@@ -7,6 +7,7 @@ mod clock;
 mod config;
 mod errors;
 mod items;
+mod logging;
 mod lyrics;
 #[cfg(target_os = "linux")]
 mod mpris;
@@ -22,6 +23,7 @@ mod platform;
 mod player;
 mod proxy;
 mod reporting;
+mod security;
 mod session;
 mod state;
 mod vision;
@@ -34,6 +36,7 @@ fn main() {
         println!("{}", config::path().display());
         return;
     }
+    logging::init();
     if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
         let configured = config::get().ui.style.clone();
         let style = if !configured.is_empty() {
