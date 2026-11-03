@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="ytm logo: a gear with a play triangle">
+  <title>ytm</title>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4fc3f7"/>
+      <stop offset="1" stop-color="#1f78b4"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22394d"/>
+      <stop offset="1" stop-color="#14202c"/>
+    </linearGradient>
+    <!-- one gear tooth, pointing up from the centre; rotated 12 times below -->
+    <rect id="tooth" x="112" y="10" width="32" height="46" rx="9"/>
+  </defs>
+
+  <!-- teeth -->
+  <g fill="url(#body)">
+    <use href="#tooth"/>
+    <use href="#tooth" transform="rotate(30 128 128)"/>
+    <use href="#tooth" transform="rotate(60 128 128)"/>
+    <use href="#tooth" transform="rotate(90 128 128)"/>
+    <use href="#tooth" transform="rotate(120 128 128)"/>
+    <use href="#tooth" transform="rotate(150 128 128)"/>
+    <use href="#tooth" transform="rotate(180 128 128)"/>
+    <use href="#tooth" transform="rotate(210 128 128)"/>
+    <use href="#tooth" transform="rotate(240 128 128)"/>
+    <use href="#tooth" transform="rotate(270 128 128)"/>
+    <use href="#tooth" transform="rotate(300 128 128)"/>
+    <use href="#tooth" transform="rotate(330 128 128)"/>
+  </g>
+
+  <!-- gear body and dark face -->
+  <circle cx="128" cy="128" r="98" fill="url(#body)"/>
+  <circle cx="128" cy="128" r="72" fill="url(#face)"/>
+  <circle cx="128" cy="128" r="72" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+
+  <!-- the triangle that takes the place of the K: a play button, optically centred -->
+  <path d="M110 94 L110 162 L168 128 Z" fill="#ffffff" stroke="#ffffff" stroke-width="12" stroke-linejoin="round"/>
+</svg>

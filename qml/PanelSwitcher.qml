@@ -20,6 +20,9 @@ QQC2.TabBar {
     Kirigami.Theme.colorSet: Kirigami.Theme.Button
 
     implicitHeight: Kirigami.Units.gridUnit * 2.4
+    // A fixed implicit width: the buttons below are sized from our *actual* width, and a TabBar derives its implicit
+    // width from its buttons, which would be a binding loop. The page gives us the real width with Layout.fillWidth.
+    implicitWidth: Kirigami.Units.gridUnit * 14
     spacing: 0
     padding: Kirigami.Units.smallSpacing / 2
 
