@@ -1,0 +1,9 @@
+# GitHub language statistics: only Rust and QML should show up.
+# (The justfile is detected as its own language; build/config/docs files are not counted.)
+justfile linguist-detectable=false
+*.just linguist-detectable=false
+Cargo.lock linguist-generated=true
+docs/** linguist-documentation=true
+packaging/** linguist-vendored=true
+assets/** linguist-vendored=true
+*.svg linguist-vendored=true
