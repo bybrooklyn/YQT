@@ -38,6 +38,8 @@ fn main() {
         "qml/MiniPlayer.qml",
         "qml/MiniPlayerContent.qml",
         "qml/TrayController.qml",
+        "qml/DownloadButton.qml",
+        "qml/DownloadsPage.qml",
     ]))
     // bundled fallback tray icon (used when the desktop icon theme has no `multimedia-audio-player`)
     .qrc_resources(["qml/icons/ytm-tray.svg"])
@@ -56,6 +58,9 @@ fn main() {
         "src/nav.rs",
         "src/settings.rs",
         "src/tray.rs",
+        "src/connectivity.rs",
+        "src/covercache.rs",
+        "src/downloadsqml.rs",
     ])
     .build();
 }

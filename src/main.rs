@@ -5,10 +5,15 @@ mod auth;
 mod backend;
 mod clock;
 mod config;
+mod connectivity;
+mod covercache;
+mod downloads;
+mod downloadsqml;
 mod errors;
 mod items;
 mod logging;
 mod lyrics;
+mod metered;
 mod models;
 #[cfg(target_os = "linux")]
 mod mpris;
