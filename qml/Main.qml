@@ -2,7 +2,6 @@
 import QtQuick
 import QtCore
 import org.kde.ytm
-import QtMultimedia
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 
@@ -23,25 +22,25 @@ Kirigami.ApplicationWindow {
         target: Backend
         function onLoggedInChanged() { root.pageCache = ({}) }
     }
-    // Playback lives in QtMultimedia; the Rust Player resolves URLs and owns the queue.
+    // Audio playback goes through the Playback seam (see Playback.qml); the Rust Player resolves URLs and owns the queue.
     property alias media: media
 
-    MediaPlayer {
+    Playback {
         id: media
         source: Player.source
-        audioOutput: AudioOutput { volume: Math.pow(Player.volume, 2) }
-        onSourceChanged: if (source.toString() !== "" && Player.autoplay) play()
-        onErrorOccurred: (error, errorString) => Player.mediaFailed(errorString)
-        onPlaybackStateChanged: root.syncMpris()
+        volume: Player.volume
+        autoplay: Player.autoplay
+        onFailed: message => Player.mediaFailed(message)
+        onPlayingChanged: root.syncMpris()
         onDurationChanged: root.syncMpris()
-        onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia && Player.resumePos > 0) {
-                position = Player.resumePos
+        onLoaded: {
+            if (Player.resumePos > 0) {
+                media.seek(Player.resumePos)
                 Player.resumePos = 0
             }
-            if (mediaStatus === MediaPlayer.EndOfMedia) {
-                if (Player.repeat === 2) { position = 0; play() } else Player.next()
-            }
+        }
+        onEnded: {
+            if (Player.repeat === 2) { media.seek(0); media.play() } else Player.next()
         }
     }
 
@@ -60,10 +59,10 @@ Kirigami.ApplicationWindow {
     }
 
     function syncMpris() {
-        Player.syncMpris(media.playbackState === MediaPlayer.PlayingState, media.position, media.duration)
+        Player.syncMpris(media.playing, media.position, media.duration)
     }
     function previousTrack() {
-        if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.position = 0; else Player.previous()
+        if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.seek(0); else Player.previous()
     }
     Timer { interval: 1000; repeat: true; running: Player.hasTrack; onTriggered: root.syncMpris() }
     Connections {
@@ -77,8 +76,8 @@ Kirigami.ApplicationWindow {
             case "stop": media.stop(); break
             case "next": Player.next(); break
             case "previous": root.previousTrack(); break
-            case "seek": media.position = Math.max(0, media.position + arg); break
-            case "setposition": media.position = arg; break
+            case "seek": media.seek(media.position + arg); break
+            case "setposition": media.seek(arg); break
             case "shuffle": Player.shuffle = arg !== 0; break
             case "repeat": Player.repeat = arg; break
             case "volume": Player.volume = arg / 1000; break
@@ -105,7 +104,7 @@ Kirigami.ApplicationWindow {
     }
     function togglePlay() {
         if (!Player.hasTrack) return
-        if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play()
+        media.toggle()
     }
 
     Shortcut { sequences: ["F11", StandardKey.FullScreen]; onActivated: root.toggleFullScreen() }

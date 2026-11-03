@@ -7,12 +7,13 @@ fn main() {
         "qml/CoverImage.qml",
         "qml/ItemsPage.qml",
         "qml/NowPlayingBar.qml",
+        "qml/Playback.qml",
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs"])
     .build();
 }

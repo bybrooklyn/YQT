@@ -206,7 +206,7 @@ Kirigami.Page {
                     // there for a moment, because the position can glitch backwards for an instant (stream range
                     // requests, buffering) – which used to make the highlight flash off and on again.
                     readonly property int rawLine: {
-                        const p = page.media.position + AppConfig.lyricsLeadMs
+                        const p = page.media.smoothPosition + AppConfig.lyricsLeadMs
                         const s = page.synced
                         let lo = 0, hi = s.length - 1, r = -1
                         while (lo <= hi) {
@@ -275,7 +275,7 @@ Kirigami.Page {
                             }
                             TapHandler {
                                 onTapped: {
-                                    page.media.position = lineItem.modelData[0]
+                                    page.media.seek(lineItem.modelData[0])
                                     backTimer.stop()
                                     lyricsPane.line = lineItem.index   // follow an explicit seek immediately
                                 }

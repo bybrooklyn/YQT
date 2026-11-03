@@ -3,7 +3,6 @@ import QtQuick
 import org.kde.ytm
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
-import QtMultimedia
 import org.kde.kirigami as Kirigami
 
 QQC2.ToolBar {
@@ -22,14 +21,14 @@ QQC2.ToolBar {
 
         RowLayout {
             Layout.fillWidth: true
-            QQC2.Label { text: bar.fmt(media.position); font: Kirigami.Theme.smallFont }
+            QQC2.Label { text: bar.fmt(media.smoothPosition); font: Kirigami.Theme.smallFont }
             QQC2.Slider {
                 Layout.fillWidth: true
                 from: 0
                 to: Math.max(media.duration, 1)
-                value: media.position
+                value: media.smoothPosition      // advances every frame, not once per player report
                 enabled: media.duration > 0
-                onMoved: media.position = value
+                onMoved: media.seek(value)
             }
             QQC2.Label { text: bar.fmt(media.duration); font: Kirigami.Theme.smallFont }
         }
@@ -88,8 +87,8 @@ QQC2.ToolBar {
                 onClicked: applicationWindow().previousTrack()
             }
             QQC2.ToolButton {
-                icon.name: Player.loading ? "process-working" : (media.playbackState === MediaPlayer.PlayingState ? "media-playback-pause" : "media-playback-start")
-                onClicked: { if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play() }
+                icon.name: Player.loading ? "process-working" : (media.playing ? "media-playback-pause" : "media-playback-start")
+                onClicked: media.toggle()
             }
             QQC2.ToolButton {
                 icon.name: "media-skip-forward"

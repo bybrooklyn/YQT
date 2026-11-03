@@ -2,6 +2,7 @@
 mod appconfig;
 mod auth;
 mod backend;
+mod clock;
 mod config;
 mod errors;
 mod items;
