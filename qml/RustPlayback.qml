@@ -62,8 +62,18 @@ Item {
     onNextSourceChanged: engine.setNext(nextSource.toString())
     onVolumeChanged: engine.setVolume(Math.pow(volume, 2))
 
+    // Settings changes apply to the running engine at once.
+    Connections {
+        target: AppConfig
+        function onAudioCrossfadeMsChanged() { engine.setCrossfadeMs(AppConfig.audioCrossfadeMs) }
+        function onAudioNormalizeChanged() { engine.setNormalize(AppConfig.audioNormalize) }
+        function onAudioGaplessChanged() { engine.setGapless(AppConfig.audioGapless) }
+        function onAudioOutputDeviceChanged() { engine.setOutputDevice(AppConfig.audioOutputDevice) }
+    }
+
     Component.onCompleted: {
         engine.setVolume(Math.pow(volume, 2))
+        engine.setOutputDevice(AppConfig.audioOutputDevice)
         engine.setCrossfadeMs(AppConfig.audioCrossfadeMs)
         engine.setNormalize(AppConfig.audioNormalize)
         engine.setGapless(AppConfig.audioGapless)

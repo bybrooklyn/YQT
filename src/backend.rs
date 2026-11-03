@@ -533,6 +533,22 @@ async fn load_liked() {
     // Merge instead of replacing: pages the user already browsed may hold songs beyond the limit.
     liked_set(|s| s.extend(tracks.items.iter().map(|t| t.id.clone())));
     LIKED_DIRTY.store(true, Ordering::Relaxed);
+    // The smart-download rule "keep liked songs" gets its input here (it does nothing unless smart downloads are on).
+    if crate::config::get().downloads.smart_enabled {
+        let items = tracks
+            .items
+            .iter()
+            .map(|t| crate::downloads::manager::Item {
+                id: t.id.clone(),
+                title: t.name.clone(),
+                artist: t.artists.first().map(|a| a.name.clone()).unwrap_or_default(),
+                album: t.album.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+                cover: t.cover.last().map(|c| c.url.clone()).unwrap_or_default(),
+                duration_ms: t.duration.map_or(0, |d| i64::from(d) * 1000),
+            })
+            .collect();
+        crate::downloads::manager::set_inputs("liked", items);
+    }
 }
 
 /// The user's playlists for the "Add to playlist" dialog: first page now, the rest via `more`.

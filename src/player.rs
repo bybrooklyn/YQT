@@ -271,6 +271,22 @@ impl qobject::Player {
         self.as_mut().set_title(QString::default());
     }
 
+    /// Tell the smart-download rules what is coming up in the queue and what was played recently.
+    /// They only act when `downloads.smart_enabled` is on; this just keeps their inputs current.
+    fn feed_smart_downloads(&self, i: usize) {
+        let cfg = crate::config::get();
+        if !cfg.downloads.smart_enabled {
+            return;
+        }
+        let from = |v: &Value| crate::downloads::manager::Item::from_json(v);
+        let ahead: Vec<_> =
+            (i + 1..).map_while(|j| self.rust().state.get(j)).take(cfg.downloads.queue_ahead_n as usize).filter_map(from).collect();
+        crate::downloads::manager::set_inputs("queue", ahead);
+        let recent: Vec<_> =
+            (0..=i).rev().map_while(|j| self.rust().state.get(j)).take(cfg.downloads.recent_n as usize).filter_map(from).collect();
+        crate::downloads::manager::set_inputs("recent", recent);
+    }
+
     fn load(mut self: Pin<&mut Self>, i: usize) {
         let Some(item) = self.rust().state.get(i).cloned() else { return };
         let generation = {
@@ -295,6 +311,8 @@ impl qobject::Player {
         self.as_mut().set_error(QString::default());
         self.as_mut().set_autoplay(true);
         self.as_mut().set_loading(true);
+
+        self.feed_smart_downloads(i);
 
         let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::get().playback.prefetch_next);
         let th = self.qt_thread();

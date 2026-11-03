@@ -70,6 +70,17 @@ Kirigami.ApplicationWindow {
         if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.seek(0); else Player.previous()
     }
     Timer { interval: 1000; repeat: true; running: Player.hasTrack; onTriggered: root.syncMpris() }
+
+    // Report plays back to YouTube (history, recommendations). The rules (threshold, once per play, signed-in only,
+    // retries) all live in Rust (src/reporting.rs); this only tells it what is playing and how far along it is.
+    Connections {
+        target: Player
+        function onVideoIdChanged() { Reporter.trackChanged(Player.videoId) }
+    }
+    Timer {
+        interval: 1000; repeat: true; running: Player.hasTrack
+        onTriggered: Reporter.tick(Math.round(media.position), media.playing)
+    }
     Connections {
         target: Player
         // Media keys, KDE Connect, the Plasma media widget (MPRIS) – see src/mpris.rs
