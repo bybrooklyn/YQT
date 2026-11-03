@@ -114,6 +114,7 @@ fn liked_set<R>(f: impl FnOnce(&mut HashSet<String>) -> R) -> R {
 
 fn next_id(this: Pin<&mut qobject::Backend>) -> i32 {
     let r = this.rust_mut();
+    // SAFETY: only bumps a plain counter in place; the QObject is never moved out of its pin.
     let r = unsafe { r.get_unchecked_mut() };
     r.next_id += 1;
     r.next_id

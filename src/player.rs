@@ -243,6 +243,7 @@ impl qobject::Player {
 
     /// Mutable access to the non-property state. Only ever used on the Qt thread.
     fn st_mut(self: Pin<&mut Self>) -> &mut PlayerRust {
+        // SAFETY: only mutates plain Rust-side fields in place; the QObject is never moved out of its pin.
         unsafe { self.rust_mut().get_unchecked_mut() }
     }
 

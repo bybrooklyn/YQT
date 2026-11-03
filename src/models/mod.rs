@@ -56,6 +56,11 @@ pub fn apply<T: Clone>(list: &mut Vec<T>, change: &Change<T>) {
 /// Tell a cxx-qt `QAbstractListModel` about a [`Change`], then mutate its mirror vector. `$this` is the
 /// `Pin<&mut Model>`, `$rows` a closure-free expression giving `&mut Vec<T>` (evaluated after each begin call).
 /// A macro because every bridge has its own `begin_*` wrapper methods.
+///
+/// SAFETY (for every `unsafe` block below): cxx-qt marks the `begin_*` / `end_*` wrappers unsafe because Qt requires
+/// each `begin_*` to be paired with its `end_*` and the row numbers to be valid. Both hold here: every `end_*` follows
+/// its `begin_*` in the same block with nothing that can return or panic in between except the vector edit itself,
+/// and the row numbers come from a [`Change`] that was checked against the current length (see `apply` and its tests).
 #[macro_export]
 macro_rules! apply_to_model {
     ($this:expr, $change:expr, $rows:expr, $roles:expr) => {{

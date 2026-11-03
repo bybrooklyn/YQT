@@ -107,6 +107,7 @@ pub fn view(result: &LyricsResult, track_ms: i64) -> View {
 impl qobject::Lyrics {
     fn start(mut self: Pin<&mut Self>, q: Query) {
         let seq = {
+            // SAFETY: only mutates plain Rust-side fields in place; the QObject is never moved out of its pin.
             let r = unsafe { self.as_mut().rust_mut().get_unchecked_mut() };
             r.seq += 1;
             r.last = Some(q.clone());
