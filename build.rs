@@ -24,6 +24,16 @@ fn main() {
         "qml/Hero.qml",
         "qml/RichPage.qml",
         "qml/NavDrawer.qml",
+        "qml/settings/SettingCard.qml",
+        "qml/settings/SettingSection.qml",
+        "qml/settings/SettingRow.qml",
+        "qml/settings/ShortcutEditor.qml",
+        "qml/settings/BrowserImport.qml",
+        "qml/settings/StreamHealth.qml",
+        "qml/settings/ProviderOrder.qml",
+        "qml/settings/PrivacyList.qml",
+        "qml/settings/Diagnostics.qml",
+        "qml/settings/FolderPicker.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
@@ -38,6 +48,7 @@ fn main() {
         "src/page.rs",
         "src/errors.rs",
         "src/nav.rs",
+        "src/settings.rs",
     ])
     .build();
 }
