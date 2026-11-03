@@ -481,6 +481,10 @@ pub fn get() -> &'static Config {
         let path = path();
         match std::fs::read_to_string(&path) {
             Ok(text) => {
+                crate::state::tighten(&path);
+                if let Some(dir) = path.parent() {
+                    crate::state::tighten(dir);
+                }
                 let (cfg, warnings) = Config::parse(&text);
                 for w in warnings {
                     eprintln!("ytm: {}: {w}", path.display());
@@ -489,9 +493,9 @@ pub fn get() -> &'static Config {
             }
             Err(_) => {
                 if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
+                    let _ = crate::state::ensure_private_dir(dir);
                 }
-                let _ = std::fs::write(&path, Config::template());
+                let _ = crate::state::write_private(&path, Config::template().as_bytes());
                 Config::default()
             }
         }

@@ -28,9 +28,7 @@ impl Session {
     /// Write via a temp file + rename, so a crash mid-write can't leave a half-written session.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
         let doc = json!({"items": self.items, "index": self.index, "position": self.position.max(0)});
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, doc.to_string())?;
-        std::fs::rename(&tmp, path)
+        crate::state::write_private(path, doc.to_string().as_bytes())
     }
 
     pub fn clear_at(path: &Path) {
