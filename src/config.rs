@@ -18,6 +18,13 @@ pub struct Config {
     pub youtube: Youtube,
     pub ui: Ui,
     pub integration: Integration,
+    pub audio: Audio,
+    pub downloads: Downloads,
+    pub appearance: Appearance,
+    pub keys: Keys,
+    pub reporting: Reporting,
+    pub window: Window,
+    pub security: Security,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +32,8 @@ pub struct Config {
 pub struct Network {
     pub connect_timeout_secs: u64,
     pub request_timeout_secs: u64,
+    /// How often a request that failed in a transient way (network blip, unreadable page) is tried again.
+    pub retries: u32,
     /// Max silence on a stream connection before the proxy gives up.
     pub stream_read_timeout_secs: u64,
     /// googlevideo refuses unbounded ranges, so audio is fetched in chunks of this size.
@@ -71,11 +80,27 @@ pub struct Library {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Lyrics {
-    /// Look lyrics up on LRCLIB (sends title, artist, duration). Off = YouTube Music's plain lyrics only.
+    /// Look lyrics up on third-party providers (they receive title, artist, duration). Off = YouTube Music's plain lyrics only.
     pub enabled: bool,
+    /// Providers to ask, in order of preference: "lrclib", "netease", "youtube". Unknown names are ignored.
+    /// All enabled providers are queried at once; a synced result always beats a plain one.
+    pub providers: Vec<String>,
     pub lrclib_url: String,
+    pub netease_url: String,
     /// Records with fewer lyric lines than this are treated as junk.
     pub min_lines: usize,
+    /// Prefer line-by-line synced lyrics over plain text, even when the plain text is longer.
+    pub prefer_synced: bool,
+    /// Multiplier for the lyric text size (1.0 = default; the text also scales with the window).
+    pub size_scale: f64,
+    /// Fill the current line left-to-right between timestamps.
+    pub karaoke: bool,
+    /// Show animated dots during long instrumental gaps.
+    pub gap_dots: bool,
+    /// Tint the current line with the cover's accent colour.
+    pub tint_with_accent: bool,
+    /// Keep looked-up lyrics on disk this long (0 = don't cache).
+    pub cache_days: u32,
 }
 
 /// Client identities. These go stale when YouTube changes things – edit here instead of rebuilding.
@@ -94,7 +119,7 @@ pub struct Youtube {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Ui {
-    /// Qt Quick Controls style; empty = org.kde.desktop on Linux, Fusion elsewhere.
+    /// Qt Quick Controls style; empty = `org.kde.desktop` on every OS (Fusion only if that style is missing), so the app looks the same everywhere.
     pub style: String,
     pub suggest_debounce_ms: u64,
     /// Highlight the next lyric line this much early.
@@ -108,9 +133,211 @@ pub struct Integration {
     pub mpris: bool,
 }
 
+/// Audio engine and equalizer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Audio {
+    /// "rust" (symphonia + opus-rs + cpal, no FFmpeg) or "qt" (Qt Multimedia, only if built with the `qt-media` feature).
+    pub engine: String,
+    pub eq_enabled: bool,
+    /// Name of the active preset ("flat", "bass_boost", … or a user preset); informational, the bands below are what applies.
+    pub eq_preset: String,
+    /// Preamp in dB, applied before the bands (negative values leave headroom for boosted bands).
+    pub eq_preamp_db: f64,
+    /// Gain in dB for the ten bands 31 Hz, 62, 125, 250, 500, 1 k, 2 k, 4 k, 8 k, 16 k.
+    pub eq_bands_db: Vec<f64>,
+    /// Start the next track without a gap.
+    pub gapless: bool,
+    /// Overlap the end of a track with the start of the next one (0 = off).
+    pub crossfade_ms: u64,
+    /// Even out loudness between tracks using YouTube's loudness data.
+    pub normalize: bool,
+    /// Output device name; empty = the system default.
+    pub output_device: String,
+}
+
+/// Offline downloads. Smart downloads are opt-in, like in YouTube Music's own apps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Downloads {
+    /// Where files are stored; empty = `<data dir>/downloads`.
+    pub dir: String,
+    /// "best", "normal" or "data_saver".
+    pub quality: String,
+    /// Automatically keep chosen songs downloaded (the rules below).
+    pub smart_enabled: bool,
+    pub keep_liked: bool,
+    /// Keep this many recently played songs.
+    pub recent_n: u32,
+    /// Keep this many upcoming queue entries ready.
+    pub queue_ahead_n: u32,
+    /// Storage budget for downloads; the oldest unpinned songs are removed first when it is exceeded. Raise it freely.
+    pub cap_gb: f64,
+    /// Remove songs not played for this many days (0 = never). Pinned playlists/albums are exempt.
+    pub remove_unplayed_days: u32,
+    pub pause_on_metered: bool,
+    pub pause_on_low_battery: bool,
+    pub low_battery_percent: u32,
+    pub max_parallel: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    /// "system", "light", "dark", "breeze-light" or "breeze-dark".
+    pub theme: String,
+    /// Corner radius of large covers, as a percentage of their size ("slightly rounded").
+    pub cover_radius_percent: f64,
+    /// Tint pages, lyrics and highlights with the colour of the current cover.
+    pub accent_from_cover: bool,
+    /// Turn off decorative animation (lyric blur/fill, shelf transitions).
+    pub reduce_motion: bool,
+    /// "comfortable" or "compact".
+    pub density: String,
+}
+
+/// Keyboard shortcuts, in Qt's key-sequence syntax. Every value must be unique.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Keys {
+    pub play_pause: String,
+    pub next: String,
+    pub previous: String,
+    pub search: String,
+    pub fullscreen: String,
+    pub mini_player: String,
+    pub now_playing: String,
+    pub lyrics: String,
+    pub volume_up: String,
+    pub volume_down: String,
+    pub seek_forward: String,
+    pub seek_back: String,
+}
+
+/// Tell YouTube what you played, so it lands in your YouTube Music history and feeds recommendations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reporting {
+    /// Only does anything while signed in.
+    pub enabled: bool,
+    /// A play counts after this many seconds of listening; songs skipped earlier are not reported.
+    pub min_play_secs: u64,
+    /// Also send periodic watch-time pings (experimental).
+    pub watchtime: bool,
+    /// Tries for a report that fails; it is then dropped. Reporting never blocks playback.
+    pub retries: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Window {
+    /// Closing the main window keeps the music playing from the tray.
+    pub close_to_tray: bool,
+    pub mini_always_on_top: bool,
+    pub remember_geometry: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Security {
+    /// Require an unguessable token in the local stream proxy's URLs.
+    pub proxy_token: bool,
+    /// Keep RustyPipe's failure reports (they contain response bodies) this many days; 0 = keep none.
+    pub report_retention_days: u32,
+    /// Strip cookies, tokens and signed URLs from logs.
+    pub redact_logs: bool,
+    /// Allow plain-http URLs for configurable endpoints (lyrics providers…). Loopback is always allowed.
+    pub allow_insecure_urls: bool,
+}
+
 impl Default for Network {
     fn default() -> Self {
-        Self { connect_timeout_secs: 10, request_timeout_secs: 20, stream_read_timeout_secs: 30, proxy_chunk_bytes: 4_000_000 }
+        Self { connect_timeout_secs: 10, request_timeout_secs: 20, retries: 1, stream_read_timeout_secs: 30, proxy_chunk_bytes: 4_000_000 }
+    }
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self {
+            // Qt stays the default until the Rust engine has passed its tests; the engine work flips this.
+            engine: "qt".into(),
+            eq_enabled: false,
+            eq_preset: "flat".into(),
+            eq_preamp_db: 0.0,
+            eq_bands_db: vec![0.0; 10],
+            gapless: true,
+            crossfade_ms: 0,
+            normalize: true,
+            output_device: String::new(),
+        }
+    }
+}
+
+impl Default for Downloads {
+    fn default() -> Self {
+        Self {
+            dir: String::new(),
+            quality: "normal".into(),
+            smart_enabled: false,
+            keep_liked: true,
+            recent_n: 50,
+            queue_ahead_n: 5,
+            cap_gb: 4.0,
+            remove_unplayed_days: 0,
+            pause_on_metered: true,
+            pause_on_low_battery: true,
+            low_battery_percent: 20,
+            max_parallel: 2,
+        }
+    }
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            cover_radius_percent: 5.0,
+            accent_from_cover: true,
+            reduce_motion: false,
+            density: "comfortable".into(),
+        }
+    }
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            play_pause: "Space".into(),
+            next: "Ctrl+Right".into(),
+            previous: "Ctrl+Left".into(),
+            search: "Ctrl+F".into(),
+            fullscreen: "F11".into(),
+            mini_player: "Ctrl+M".into(),
+            now_playing: "Ctrl+P".into(),
+            lyrics: "Ctrl+L".into(),
+            volume_up: "Ctrl+Up".into(),
+            volume_down: "Ctrl+Down".into(),
+            seek_forward: "Shift+Right".into(),
+            seek_back: "Shift+Left".into(),
+        }
+    }
+}
+
+impl Default for Reporting {
+    fn default() -> Self {
+        Self { enabled: true, min_play_secs: 30, watchtime: false, retries: 3 }
+    }
+}
+
+impl Default for Window {
+    fn default() -> Self {
+        Self { close_to_tray: false, mini_always_on_top: true, remember_geometry: true }
+    }
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Self { proxy_token: true, report_retention_days: 7, redact_logs: true, allow_insecure_urls: false }
     }
 }
 
@@ -149,7 +376,19 @@ impl Default for Library {
 
 impl Default for Lyrics {
     fn default() -> Self {
-        Self { enabled: true, lrclib_url: "https://lrclib.net".into(), min_lines: 4 }
+        Self {
+            enabled: true,
+            providers: vec!["lrclib".into(), "netease".into(), "youtube".into()],
+            lrclib_url: "https://lrclib.net".into(),
+            netease_url: "https://music.163.com".into(),
+            min_lines: 4,
+            prefer_synced: true,
+            size_scale: 1.0,
+            karaoke: true,
+            gap_dots: true,
+            tint_with_accent: true,
+            cache_days: 30,
+        }
     }
 }
 
@@ -316,5 +555,82 @@ mod tests {
         let (c, w) = Config::parse("[playback]\ndefault_volume = 1\n");
         assert!(w.is_empty(), "{w:?}");
         assert_eq!(c.playback.default_volume, 1.0);
+    }
+
+    // ---- the sections added for audio / downloads / appearance / keys / reporting / window / security ----
+
+    #[test]
+    fn new_sections_have_the_decided_defaults() {
+        let c = Config::default();
+        // downloads: opt-in smart downloads, 4 GB budget (the user's choice)
+        assert!(!c.downloads.smart_enabled);
+        assert_eq!(c.downloads.cap_gb, 4.0);
+        assert_eq!(c.downloads.quality, "normal");
+        assert!(c.downloads.pause_on_metered && c.downloads.pause_on_low_battery);
+        // audio: ten flat bands, EQ off, Qt engine until the Rust one is proven
+        assert_eq!(c.audio.eq_bands_db, vec![0.0; 10]);
+        assert!(!c.audio.eq_enabled);
+        assert_eq!(c.audio.engine, "qt");
+        // lyrics: three providers, synced preferred
+        assert_eq!(c.lyrics.providers, ["lrclib", "netease", "youtube"]);
+        assert!(c.lyrics.prefer_synced && c.lyrics.karaoke && c.lyrics.tint_with_accent);
+        // reporting is on (the user asked for it) but only acts when signed in
+        assert!(c.reporting.enabled);
+        assert_eq!(c.reporting.min_play_secs, 30);
+        // window / security
+        assert!(!c.window.close_to_tray);
+        assert!(c.security.proxy_token && c.security.redact_logs && !c.security.allow_insecure_urls);
+    }
+
+    #[test]
+    fn shortcuts_are_unique() {
+        let k = Config::default().keys;
+        let all = [
+            &k.play_pause,
+            &k.next,
+            &k.previous,
+            &k.search,
+            &k.fullscreen,
+            &k.mini_player,
+            &k.now_playing,
+            &k.lyrics,
+            &k.volume_up,
+            &k.volume_down,
+            &k.seek_forward,
+            &k.seek_back,
+        ];
+        let unique: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(unique.len(), all.len(), "two actions share a shortcut: {all:?}");
+    }
+
+    #[test]
+    fn eq_bands_and_provider_lists_can_be_overridden() {
+        let (c, w) = Config::parse(
+            "[audio]\neq_enabled = true\neq_bands_db = [1, 2.5, 0, -3, 0, 0, 0, 0, 0, 4]\n[lyrics]\nproviders = [\"netease\", \"lrclib\"]\n",
+        );
+        assert!(w.is_empty(), "{w:?}");
+        assert!(c.audio.eq_enabled);
+        assert_eq!(c.audio.eq_bands_db.len(), 10);
+        assert_eq!(c.audio.eq_bands_db[1], 2.5);
+        assert_eq!(c.lyrics.providers, ["netease", "lrclib"]);
+    }
+
+    #[test]
+    fn older_config_files_still_parse_and_get_the_new_defaults() {
+        // what versions before these sections wrote
+        let old = "[network]\nconnect_timeout_secs = 12\n[lyrics]\nenabled = true\nlrclib_url = \"https://lrclib.net\"\nmin_lines = 4\n[ui]\nsuggest_debounce_ms = 220\n";
+        let (c, w) = Config::parse(old);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(c.network.connect_timeout_secs, 12);
+        assert_eq!(c.downloads.cap_gb, 4.0);
+        assert_eq!(c.lyrics.providers.len(), 3);
+    }
+
+    #[test]
+    fn a_wrongly_typed_download_cap_falls_back_without_touching_its_neighbours() {
+        let (c, w) = Config::parse("[downloads]\ncap_gb = \"lots\"\nquality = \"best\"\n");
+        assert_eq!(c.downloads.cap_gb, 4.0);
+        assert_eq!(c.downloads.quality, "best");
+        assert!(w.iter().any(|m| m.contains("downloads.cap_gb")), "{w:?}");
     }
 }
