@@ -128,13 +128,15 @@ QQC2.ToolBar {
                 radiusPercent: AppConfig.coverRadiusPercent
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 3.6
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 3.6
-                TapHandler { onTapped: applicationWindow().showNowPlaying("queue") }
+                TapHandler { onTapped: applicationWindow().toggleNowPlaying() }
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
             }
             ColumnLayout {
                 spacing: 0
                 Layout.fillWidth: true
                 Layout.minimumWidth: Kirigami.Units.gridUnit * 6
-                TapHandler { onTapped: applicationWindow().showNowPlaying("queue") }
+                TapHandler { onTapped: applicationWindow().toggleNowPlaying() }
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
                 QQC2.Label {
                     text: Player.title
                     elide: Text.ElideRight

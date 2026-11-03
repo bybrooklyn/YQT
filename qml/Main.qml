@@ -21,6 +21,10 @@ Kirigami.ApplicationWindow {
     Connections {
         target: Backend
         function onLoggedInChanged() { root.pageCache = ({}) }
+        // A like YouTube refused: the heart was already put back; say why instead of failing silently.
+        function onLikeFailed(videoId, message) {
+            root.showPassiveNotification(qsTr("Couldn’t update your liked songs: %1").arg(message.split("\n\n")[0]), "long")
+        }
     }
     // Audio playback goes through the Playback seam (see Playback.qml); the Rust Player resolves URLs and owns the queue.
     property alias media: media
@@ -122,6 +126,8 @@ Kirigami.ApplicationWindow {
     }
 
     function go(name) {
+        // The player opens *on top of* the current page (so closing it returns there); every other destination replaces the stack.
+        if (name === "queue") { showNowPlaying("queue"); return }
         pageStack.clear()
         switch (name) {
         case "home":
@@ -140,9 +146,6 @@ Kirigami.ApplicationWindow {
                 searchable: false,
                 emptyText: qsTr("Nothing in your library yet")
             })
-            break
-        case "queue":
-            showNowPlaying("queue")
             break
         case "settings":
             pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
@@ -170,6 +173,13 @@ Kirigami.ApplicationWindow {
         pageStack.push(Qt.resolvedUrl("NowPlayingPage.qml"), {tab: tab})
     }
     function showLyrics() { showNowPlaying("lyrics") }
+
+    /// Pressing the bottom bar: while the player is open, go back to the page you were on; otherwise open the player.
+    function toggleNowPlaying() {
+        const cur = pageStack.currentItem
+        if (cur && cur.isNowPlaying && pageStack.depth > 1) pageStack.pop()
+        else showNowPlaying("queue")
+    }
 
     function addToPlaylist(item) {
         addDialog.song = item
