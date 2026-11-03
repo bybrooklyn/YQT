@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use crate::auth::{self, Input, AUTH_MSG};
 use crate::items::*;
-use crate::lyrics as lrc;
 use crate::state::st;
 use crate::ytapi;
 use core::pin::Pin;
@@ -49,8 +48,6 @@ pub mod qobject {
         /// Next page for a list whose first answer carried a `pager` id.
         #[qinvokable]
         fn more(self: Pin<&mut Backend>, pager: i32) -> i32;
-        #[qinvokable]
-        fn lyrics(self: Pin<&mut Backend>, video_id: &QString, title: &QString, artist: &QString, seconds: i32) -> i32;
         /// JSON list of importable browsers: [{id, name, isDefault}], default browser first.
         #[qinvokable]
         fn browsers(self: &Backend) -> QString;
@@ -503,29 +500,6 @@ pub(crate) async fn browse(target: String) -> Res {
     }
 }
 
-/// Synced lyrics from LRCLIB when it has them, otherwise YouTube Music's plain text.
-async fn lyrics(video_id: String, title: String, artist: String, seconds: u32) -> Res {
-    if let Some((synced, plain)) = lrc::lrclib(&title, &artist, seconds).await {
-        let lines: Vec<Value> = synced.into_iter().map(|(t, l)| json!([t, l])).collect();
-        return Ok(json!({"synced": lines, "plain": plain, "source": "LRCLIB"}));
-    }
-    let q = st().rp.query();
-    // For lyrics, "not found / unavailable" just means there are none (e.g. a video that isn't a music track),
-    // so say that instead of the generic "that item doesn't exist".
-    let lyrics_err = |e: RpError| match e {
-        RpError::Extraction(rustypipe::error::ExtractionError::NotFound { .. } | rustypipe::error::ExtractionError::Unavailable { .. }) => {
-            NO_LYRICS.to_owned()
-        }
-        e => err(e),
-    };
-    let d = q.music_details(&video_id).await.map_err(lyrics_err)?;
-    let id = d.lyrics_id.ok_or(NO_LYRICS)?;
-    let l = q.music_lyrics(id).await.map_err(lyrics_err)?;
-    Ok(json!({"synced": [], "plain": l.body, "source": l.footer}))
-}
-
-const NO_LYRICS: &str = "No lyrics available";
-
 async fn set_cookie(input: Input) -> Result<(), String> {
     let rp = &st().rp;
     match input {
@@ -583,9 +557,6 @@ impl qobject::Backend {
     }
     fn more(self: Pin<&mut Self>, pager: i32) -> i32 {
         spawn(self, more(pager))
-    }
-    fn lyrics(self: Pin<&mut Self>, video_id: &QString, title: &QString, artist: &QString, seconds: i32) -> i32 {
-        spawn(self, lyrics(video_id.to_string(), title.to_string(), artist.to_string(), seconds.max(0) as u32))
     }
     fn browsers(&self) -> QString {
         let list: Vec<Value> =
@@ -707,10 +678,6 @@ mod live {
 
         let p = browse("playlist:PLMC9KNkIncKtPzgY-5rmhvj7fax8fdxoj".into()).await;
         println!("playlist: {:?}", p.as_ref().map(|v| (v["title"].clone(), v["subtitle"].clone(), count(v), v["more"].clone())));
-
-        let l = lyrics("dQw4w9WgXcQ".into(), "Never Gonna Give You Up".into(), "Rick Astley".into(), 213).await.expect("lyrics");
-        println!("lyrics: {} synced lines, source {}", l["synced"].as_array().unwrap().len(), l["source"]);
-        assert!(l["synced"].as_array().unwrap().len() > 10);
     }
 
     #[tokio::test]

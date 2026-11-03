@@ -12,6 +12,8 @@ fn main() {
         "qml/Playback.qml",
         "qml/QueuePanel.qml",
         "qml/LyricsPanel.qml",
+        "qml/LyricLine.qml",
+        "qml/LyricGap.qml",
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
@@ -61,6 +63,7 @@ fn main() {
         "src/connectivity.rs",
         "src/covercache.rs",
         "src/downloadsqml.rs",
+        "src/lyrics_qt.rs",
     ])
     .build();
 }

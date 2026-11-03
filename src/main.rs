@@ -13,6 +13,7 @@ mod errors;
 mod items;
 mod logging;
 mod lyrics;
+mod lyrics_qt;
 mod metered;
 mod models;
 #[cfg(target_os = "linux")]
