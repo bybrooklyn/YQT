@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+mod accent;
 mod appconfig;
 mod auth;
 mod backend;
@@ -16,6 +17,7 @@ mod mpris;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "mpris_stub.rs"]
 mod mpris_stub_check;
+mod pagedata;
 mod player;
 mod proxy;
 mod session;

@@ -17,6 +17,6 @@ fn main() {
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs"])
     .build();
 }
