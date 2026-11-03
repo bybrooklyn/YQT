@@ -9,6 +9,7 @@ mod errors;
 mod items;
 mod logging;
 mod lyrics;
+mod lyrics_qt;
 #[cfg(target_os = "linux")]
 mod mpris;
 #[cfg(not(target_os = "linux"))]

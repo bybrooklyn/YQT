@@ -11,12 +11,14 @@ fn main() {
         "qml/Playback.qml",
         "qml/QueuePanel.qml",
         "qml/LyricsPanel.qml",
+        "qml/LyricLine.qml",
+        "qml/LyricGap.qml",
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs", "src/lyrics_qt.rs"])
     .build();
 }
