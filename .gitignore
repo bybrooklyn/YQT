@@ -5,6 +5,7 @@ target-*/
 
 # editor / tooling
 .qmlls.ini
+/.claude/
 *.log
 *.swp
 
