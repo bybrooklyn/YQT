@@ -48,6 +48,9 @@ pub mod qobject {
         /// Next page for a list whose first answer carried a `pager` id.
         #[qinvokable]
         fn more(self: Pin<&mut Backend>, pager: i32) -> i32;
+        /// Lyrics for a track: `{synced: [[ms, line], ...], plain, source}`; "Lyrics unavailable" when nobody has them.
+        #[qinvokable]
+        fn lyrics(self: Pin<&mut Backend>, video_id: &QString, title: &QString, artist: &QString, seconds: i32) -> i32;
         /// JSON list of importable browsers: [{id, name, isDefault}], default browser first.
         #[qinvokable]
         fn browsers(self: &Backend) -> QString;
@@ -559,7 +562,27 @@ async fn my_playlists() -> Res {
     Ok(paged("", "", "", Pager::Playlists(p, "Playlists".into()), true))
 }
 
+/// Lyrics from every enabled provider at once (LRCLIB, NetEase, YouTube); synced lyrics always win over plain ones.
+async fn lyrics(video_id: String, title: String, artist: String, seconds: u32) -> Res {
+    use crate::lyrics::{rank::Query, LyricsResult};
+    let cfg = crate::config::current();
+    let q = Query { video_id, title, artist, duration_s: seconds };
+    let dir = crate::lyrics::cache::default_dir();
+    match crate::lyrics::resolve(crate::state::http(), &cfg.lyrics, cfg.security.allow_insecure_urls, &q, dir.as_deref()).await {
+        LyricsResult::Synced { lines, source } => {
+            let lines: Vec<Value> = lines.into_iter().map(|(t, l)| json!([t, l])).collect();
+            Ok(json!({"synced": lines, "plain": "", "source": source}))
+        }
+        LyricsResult::Plain { text, source } => Ok(json!({"synced": [], "plain": text, "source": source})),
+        LyricsResult::Unavailable => Err("Lyrics unavailable".to_owned()),
+        LyricsResult::Failed(e) => Err(e.ui_string()),
+    }
+}
+
 impl qobject::Backend {
+    fn lyrics(self: Pin<&mut Self>, video_id: &QString, title: &QString, artist: &QString, seconds: i32) -> i32 {
+        spawn(self, lyrics(video_id.to_string(), title.to_string(), artist.to_string(), seconds.max(0) as u32))
+    }
     fn search(self: Pin<&mut Self>, query: &QString, filter: &QString) -> i32 {
         spawn(self, search(query.to_string(), filter.to_string()))
     }

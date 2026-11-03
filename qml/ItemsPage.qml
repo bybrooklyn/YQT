@@ -7,66 +7,267 @@ import org.kde.kirigami as Kirigami
 
 // One page for everything list-shaped: home, search results, albums, playlists, artists, library.
 //
-// This file is only a view. The `PageController` (Rust) is the list model and does the loading, paging, caching,
-// retrying and playing; it tells us what the page is (filters, whether it is a collection, whether it needs an
-// account) and what to show (rows, hero, error).
+// Loading is lazy: lists fetch their next page only when you scroll near the end, Home fills in row by row as each
+// row arrives, and pages you have already seen are kept for a while so going back is instant.
 Kirigami.ScrollablePage {
     id: page
 
     property string target           // "home", "album:ID", "playlist:ID", "artist:ID", "library", ...
-    property string query            // a non-empty query makes this a search page
-    property string filter           // initial chip (search type / library tab); the default comes from Rust
+    property string query
+    property string filter           // search type, or library tab
+    property var chips: []           // [[label, value], ...] tab-like filters (library); search has its own
+    property bool collection: false  // album/playlist/artist page: clicking a song plays the whole list
+    property bool searchable: true
+    property bool needsLogin: false
+    property bool reloadOnLogin: false
     property string emptyText: qsTr("Nothing here")
 
-    // Accepted for compatibility with callers that still pass them; the controller now derives all of these.
-    property var chips
-    property bool collection
-    property bool searchable
-    property bool needsLogin
-    property bool reloadOnLogin
+    property var items: []
+    property string heading
+    property string subheading
+    property string headThumb
+    property string errorText        // headline, shown large
+    property string errorDetail      // technical detail, shown small
+    property bool busy: false
+    property int reqId: -1
 
-    readonly property alias controller: ctl
+    // pagination
+    property int pagerId: 0
+    property bool hasMore: false
+    property bool loadingMore: false
+    property int moreId: -1
+    property bool feedQueue: false   // after "Play" on a long list: keep loading pages and append songs to the queue
 
-    function focusSearch() { if (ctl.searchable) { searchField.forceActiveFocus(); searchField.selectAll() } }
+    // progressive pages (Home): rows by slot, so they can arrive in any order
+    property var slots: ({})
+    readonly property bool progressive: target === "home" && query.length === 0
 
-    PageController { id: ctl }
-    Component.onCompleted: ctl.load(target, query, filter, false)
+    // search suggestions
+    property var suggestions: []
+    property int suggestId: -1
+
+    readonly property var searchChips: [[qsTr("All"), ""], [qsTr("Songs"), "songs"], [qsTr("Albums"), "albums"], [qsTr("Artists"), "artists"], [qsTr("Playlists"), "playlists"]]
+    readonly property var activeChips: query.length > 0 ? searchChips : chips
+    readonly property bool authProblem: errorText.indexOf("Settings") >= 0
+
+    function focusSearch() { if (searchable) { searchField.forceActiveFocus(); searchField.selectAll() } }
+    function songs() { return items.filter(i => i.kind === "song") }
+    function itemAt(i) { return i >= 0 && i < items.length ? items[i] : null }
+    function field(i, key) { const it = itemAt(i); return it && it[key] ? it[key] : "" }
+    function parse(json) { try { return JSON.parse(json) } catch (e) { return null } }
+
+    function setError(message) {
+        const cut = message.indexOf("\n\n")
+        errorText = cut < 0 ? message : message.slice(0, cut)
+        errorDetail = cut < 0 ? "" : message.slice(cut + 2)
+    }
+    function clearError() { errorText = ""; errorDetail = "" }
+
+    // ---- page cache -------------------------------------------------------------------------------------------
+    // Searches and long (paged) lists are not cached; everything else is, per target+tab.
+    function cacheKey() { return query ? "" : target + "|" + filter }
+    function cacheGet() { const k = cacheKey(); return k && AppConfig.pageCacheMs > 0 ? applicationWindow().pageCache[k] : null }
+    function cachePut(entry) {
+        const k = cacheKey()
+        if (k && AppConfig.pageCacheMs > 0) { entry.t = Date.now(); applicationWindow().pageCache[k] = entry }
+    }
+
+    function showResult(res) {
+        heading = res.title || ""
+        subheading = res.subtitle || ""
+        headThumb = res.thumbnail || ""
+        pagerId = res.pager || 0
+        hasMore = !!res.more
+        model.clear()
+        for (const i of res.items || []) model.append(i)
+        items = res.items || []
+    }
+
+    function rebuildFromSlots() {
+        const all = []
+        for (const k of Object.keys(slots).map(Number).sort((a, b) => a - b)) for (const i of slots[k]) all.push(i)
+        model.clear()
+        for (const i of all) model.append(i)
+        items = all
+    }
+
+    function load(force) {
+        clearError()
+        pagerId = 0; hasMore = false; loadingMore = false; feedQueue = false
+        if (needsLogin && !Backend.loggedIn) {
+            setError(qsTr("Sign in from Settings to see your library"))
+            model.clear(); items = []
+            return
+        }
+        const hit = force ? null : cacheGet()   // `force`: the account changed, so cached pages are wrong
+        const fresh = hit && (Date.now() - hit.t) < AppConfig.pageCacheMs
+        if (hit) {
+            if (hit.slots) { slots = Object.assign({}, hit.slots); rebuildFromSlots() }
+            else showResult(hit.res)
+        } else {
+            slots = ({})
+            model.clear(); items = []
+        }
+        if (fresh) { busy = false; return }
+        busy = !hit                       // a cached copy is shown while a quiet refresh runs behind it
+        if (query) reqId = Backend.search(query, filter)
+        else if (progressive) reqId = Backend.browseHome()
+        else reqId = Backend.browse(filter && target === "library" ? target + ":" + filter : target)
+    }
+
+    // Fetch the next page only when the list is close to its end (or we are feeding the queue).
+    // "Close" is judged by which row sits at the bottom of the viewport, not by contentHeight: a ListView only
+    // *estimates* its height until delegates exist, and that estimate is far too small right after a page arrives.
+    function nearEnd() {
+        if (view.count === 0 || view.height <= 0) return false
+        const bottom = view.indexAt(view.width / 2, view.contentY + view.height - 1)
+        return bottom < 0 || bottom >= view.count - 10   // -1: past the last row (or on a section header)
+    }
+    function maybeMore() {
+        if (hasMore && !loadingMore && !busy && pagerId > 0 && (feedQueue || nearEnd())) {
+            loadingMore = true
+            moreId = Backend.more(pagerId)
+        }
+    }
+    function startPlaying(list, start) {
+        Player.playList(JSON.stringify(list), start)
+        if (hasMore) { feedQueue = true; maybeMore() }
+    }
 
     Connections {
         target: Backend
-        function onLoggedInChanged() { ctl.loginChanged() }
+        function onPartial(id, slot, json) {
+            if (id !== page.reqId) return
+            const res = page.parse(json)
+            if (!res) return
+            page.busy = false
+            const next = Object.assign({}, page.slots)
+            next[slot] = res.items
+            page.slots = next
+            page.rebuildFromSlots()
+        }
+        function onDone(id, err, json) {
+            if (id === page.reqId) {
+                page.busy = false
+                if (err) {
+                    // keep what is on screen (cached or partial); only show the error if there is nothing
+                    if (model.count === 0) page.setError(err)
+                    return
+                }
+                const res = page.parse(json)
+                if (!res) { if (model.count === 0) page.setError(qsTr("Got an unreadable answer from the app.")); return }
+                if (page.progressive) {
+                    page.cachePut({slots: Object.assign({}, page.slots)})
+                    return
+                }
+                page.showResult(res)
+                if (!res.more) page.cachePut({res: res})
+                // (no eager "fetch more" here: the list calls maybeMore itself once it has laid the rows out)
+            } else if (id === page.moreId) {
+                page.loadingMore = false
+                if (err) { page.hasMore = false; return }   // keep what we have
+                const res = page.parse(json)
+                if (!res) { page.hasMore = false; return }
+                page.hasMore = !!res.more
+                for (const i of res.items) model.append(i)
+                page.items = page.items.concat(res.items)
+                if (page.feedQueue) {
+                    for (const s of res.items) if (s.kind === "song") Player.enqueue(JSON.stringify(s))
+                    Qt.callLater(page.maybeMore)   // feeding the queue ignores scroll position: keep going
+                }
+            } else if (id === page.suggestId && !err) {
+                const list = page.parse(json)
+                if (!list) return
+                page.suggestions = list
+                suggestPopup.visible = list.length > 0 && searchField.activeFocus
+            }
+        }
+        function onLoggedInChanged() {
+            if (page.needsLogin || page.reloadOnLogin) page.load(true)
+        }
     }
 
-    function activate(row, kind, browseId, title) {
-        if (kind === "song") ctl.playItem(row)
-        else applicationWindow().open({kind: kind, browseId: browseId, title: title})
+    function activate(i) {
+        const item = itemAt(i)
+        if (!item) return
+        if (item.kind === "song") {
+            if (collection) {
+                const s = songs()
+                Player.playList(JSON.stringify(s), Math.max(0, s.findIndex(x => x.videoId === item.videoId)))
+            } else {
+                Player.playSong(JSON.stringify(item))
+            }
+        } else {
+            applicationWindow().open(item)
+        }
     }
+
+    Component.onCompleted: load()
+    onFilterChanged: if (query || target === "library") load()
+
+    ListModel { id: model }
 
     header: ColumnLayout {
-        visible: ctl.searchable || ctl.chipLabels.length > 0
+        visible: page.searchable || page.activeChips.length > 0
         spacing: 0
 
-        SearchBar {
+        Kirigami.SearchField {
             id: searchField
-            visible: ctl.searchable
-            controller: ctl
-            query: page.query
+            visible: page.searchable
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
+            placeholderText: qsTr("Search songs, albums, artists…")
+            autoAccept: false
+            Component.onCompleted: text = page.query
+            onAccepted: {
+                suggestPopup.close()
+                if (text.trim() !== page.query) applicationWindow().search(text)
+            }
+            onTextEdited: suggestTimer.restart()
+            onActiveFocusChanged: if (!activeFocus) suggestPopup.close()
+
+            Timer {
+                id: suggestTimer
+                interval: AppConfig.suggestDebounceMs
+                onTriggered: {
+                    if (searchField.text.trim().length > 1) page.suggestId = Backend.suggest(searchField.text.trim())
+                    else suggestPopup.close()
+                }
+            }
+
+            QQC2.Popup {
+                id: suggestPopup
+                y: searchField.height
+                width: searchField.width
+                padding: 0
+                focus: false
+                closePolicy: QQC2.Popup.CloseOnEscape
+                contentItem: ListView {
+                    implicitHeight: Math.min(contentHeight, Kirigami.Units.gridUnit * 14)
+                    model: page.suggestions
+                    clip: true
+                    delegate: QQC2.ItemDelegate {
+                        required property string modelData
+                        width: ListView.view.width
+                        text: modelData
+                        icon.name: "search"
+                        onClicked: { suggestPopup.close(); searchField.text = modelData; applicationWindow().search(modelData) }
+                    }
+                }
+            }
         }
         RowLayout {
-            visible: ctl.chipLabels.length > 0
+            visible: page.activeChips.length > 0
             Layout.margins: Kirigami.Units.smallSpacing
             Repeater {
-                model: ctl.chipLabels
+                model: page.activeChips
                 QQC2.ToolButton {
-                    required property int index
-                    required property string modelData
-                    text: modelData
+                    required property var modelData
+                    text: modelData[0]
                     checkable: true
                     autoExclusive: true
-                    checked: ctl.filter === ctl.chipValues[index]
-                    onClicked: ctl.selectFilter(ctl.chipValues[index])
+                    checked: page.filter === modelData[1]
+                    onClicked: page.filter = modelData[1]
                 }
             }
         }
@@ -74,67 +275,51 @@ Kirigami.ScrollablePage {
 
     ListView {
         id: view
-        model: ctl
+        model: model
         clip: true
         reuseItems: true
-
-        // Paging is the controller's rule; we only report which row sits at the viewport's bottom edge
-        // (-1: past the last row, -2: rows not laid out yet). Throttled so it runs after layout, never inside it.
-        function bottomIndex() {
-            const y = contentY + height - 1
-            for (const dy of [0, 6, 24, 60]) {         // the edge may fall on a section header: look a little higher
-                const i = indexAt(width / 2, y - dy)
-                if (i >= 0) return i
-            }
-            return atYEnd ? -1 : -2
-        }
-        function reportScroll() {
-            if (count > 0 && height > 0) ctl.nearEnd(bottomIndex(), count)
-        }
-        Timer { id: scrollTimer; interval: 40; onTriggered: view.reportScroll() }
-        onContentYChanged: if (!scrollTimer.running) scrollTimer.start()
-        onContentHeightChanged: if (!scrollTimer.running) scrollTimer.start()
-        onCountChanged: if (!scrollTimer.running) scrollTimer.start()
+        // Lazy paging: look again whenever the scroll position or content size changes.
+        onContentYChanged: page.maybeMore()
+        onContentHeightChanged: page.maybeMore()
 
         header: RowLayout {
             width: view.width
-            visible: ctl.hasHero
+            visible: page.collection && page.heading.length > 0
             height: visible ? implicitHeight : 0
             spacing: Kirigami.Units.largeSpacing
             CoverImage {
-                source: ctl.heroCover
-                kind: "album"
+                source: page.headThumb
                 decode: 600
-                radiusPercent: AppConfig.coverRadiusPercent
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 8
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 8
                 Layout.margins: Kirigami.Units.largeSpacing
             }
             ColumnLayout {
                 Layout.fillWidth: true
-                Kirigami.Heading { text: ctl.heroTitle; level: 1; wrapMode: Text.Wrap; Layout.fillWidth: true }
-                QQC2.Label { text: ctl.heroSubtitle; wrapMode: Text.Wrap; opacity: 0.7; Layout.fillWidth: true; visible: text.length > 0 }
-                QQC2.Label { text: ctl.heroStats.join(" • "); opacity: 0.7; visible: text.length > 0 }
-                QQC2.Label { text: ctl.heroDescription; wrapMode: Text.Wrap; maximumLineCount: 4; elide: Text.ElideRight; Layout.fillWidth: true; visible: text.length > 0 }
-                Kirigami.UrlButton { url: ctl.heroWikipediaUrl; text: qsTr("Wikipedia"); visible: ctl.heroWikipediaUrl.length > 0 }
+                Kirigami.Heading { text: page.heading; level: 1; wrapMode: Text.Wrap; Layout.fillWidth: true }
+                QQC2.Label { text: page.subheading; wrapMode: Text.Wrap; opacity: 0.7; Layout.fillWidth: true; visible: text.length > 0 }
                 RowLayout {
                     QQC2.Button {
                         text: qsTr("Play")
                         icon.name: "media-playback-start"
-                        enabled: ctl.songCount > 0
-                        onClicked: ctl.playAll(false)
+                        enabled: page.songs().length > 0
+                        onClicked: page.startPlaying(page.songs(), 0)
                     }
                     QQC2.Button {
                         text: qsTr("Shuffle")
                         icon.name: "media-playlist-shuffle"
-                        enabled: ctl.songCount > 0
-                        onClicked: ctl.playAll(true)
+                        enabled: page.songs().length > 0
+                        onClicked: {
+                            const s = page.songs()
+                            Player.shuffle = true
+                            page.startPlaying(s, Math.floor(Math.random() * s.length))
+                        }
                     }
                     QQC2.Button {
                         text: qsTr("Add to queue")
                         icon.name: "media-playlist-append"
-                        enabled: ctl.songCount > 0
-                        onClicked: ctl.addAllToQueue()
+                        enabled: page.songs().length > 0
+                        onClicked: { for (const s of page.songs()) Player.enqueue(JSON.stringify(s)) }
                     }
                 }
             }
@@ -142,8 +327,8 @@ Kirigami.ScrollablePage {
 
         footer: Item {
             width: view.width
-            height: ctl.loadingMore || ctl.refreshing ? Kirigami.Units.gridUnit * 3 : 0
-            QQC2.BusyIndicator { anchors.centerIn: parent; running: ctl.loadingMore || ctl.refreshing; visible: running }
+            height: page.loadingMore ? Kirigami.Units.gridUnit * 3 : 0
+            QQC2.BusyIndicator { anchors.centerIn: parent; running: page.loadingMore; visible: running }
         }
 
         section.property: "section"
@@ -160,41 +345,36 @@ Kirigami.ScrollablePage {
             required property int index
             required property string title
             required property string subtitle
-            required property string artist
             required property string kind
             required property string videoId
-            required property string browseId
             required property string thumbnail
             required property string duration
-            required property string artistId
-            required property string albumId
-            required property string placeholder
 
             readonly property bool liked: { Backend.likedRev; return Backend.isLiked(videoId) }
 
             width: ListView.view.width
             highlighted: kind === "song" && Player.hasTrack && Player.videoId === videoId
-            onClicked: page.activate(index, kind, browseId, title)
+            onClicked: page.activate(index)
             TapHandler { acceptedButtons: Qt.RightButton; enabled: row.kind === "song"; onTapped: rowMenu.popup() }
 
             QQC2.Menu {
                 id: rowMenu
-                QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: ctl.playNext(row.index) }
-                QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: ctl.enqueue(row.index) }
+                QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: Player.playNext(JSON.stringify(page.itemAt(row.index))) }
+                QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: Player.enqueue(JSON.stringify(page.itemAt(row.index))) }
                 QQC2.MenuSeparator { visible: Backend.loggedIn }
                 QQC2.MenuItem {
-                    visible: row.artistId !== ""
+                    visible: page.field(row.index, "artistId") !== ""
                     height: visible ? implicitHeight : 0
                     text: qsTr("Go to artist")
                     icon.name: "view-media-artist"
-                    onTriggered: applicationWindow().open({kind: "artist", browseId: row.artistId, title: row.artist})
+                    onTriggered: applicationWindow().open({kind: "artist", browseId: page.field(row.index, "artistId"), title: page.field(row.index, "artist")})
                 }
                 QQC2.MenuItem {
-                    visible: row.albumId !== ""
+                    visible: page.field(row.index, "albumId") !== ""
                     height: visible ? implicitHeight : 0
                     text: qsTr("Go to album")
                     icon.name: "media-optical-audio"
-                    onTriggered: applicationWindow().open({kind: "album", browseId: row.albumId, title: row.title})
+                    onTriggered: applicationWindow().open({kind: "album", browseId: page.field(row.index, "albumId"), title: page.field(row.index, "title")})
                 }
                 QQC2.MenuItem {
                     visible: Backend.loggedIn
@@ -208,7 +388,7 @@ Kirigami.ScrollablePage {
                     height: visible ? implicitHeight : 0
                     text: qsTr("Add to playlist…")
                     icon.name: "list-add"
-                    onTriggered: applicationWindow().addToPlaylist({videoId: row.videoId, title: row.title})
+                    onTriggered: applicationWindow().addToPlaylist(page.itemAt(row.index))
                 }
             }
 
@@ -216,9 +396,7 @@ Kirigami.ScrollablePage {
                 spacing: Kirigami.Units.largeSpacing
                 CoverImage {
                     source: row.thumbnail
-                    kind: row.placeholder
                     decode: 160
-                    radiusPercent: row.kind === "artist" ? 50 : 0
                     Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
                     Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
                 }
@@ -255,35 +433,23 @@ Kirigami.ScrollablePage {
             }
         }
 
-        // failures replace the page; the view decides nothing about them
-        ErrorView {
-            anchors.fill: parent
-            visible: ctl.state === "error" || ctl.state === "offline"
-            kind: ctl.errorKind
-            headline: ctl.errorHeadline
-            hint: ctl.errorHint
-            detail: ctl.errorDetail
-            errorId: ctl.errorId
-            diagnostics: ctl.errorDiagnostics
-            retryMode: ctl.errorRetry
-            retryMs: ctl.errorRetryMs
-            onRetryRequested: ctl.retry()
-            onAutoRetryRequested: ctl.autoRetry()
-            onOpenSettings: applicationWindow().go("settings")
-            onShowDownloads: applicationWindow().go("downloads")
-        }
-
         Kirigami.PlaceholderMessage {
             anchors.centerIn: parent
             width: parent.width - Kirigami.Units.gridUnit * 4
-            visible: ctl.state === "ready" && ctl.count === 0 && !ctl.refreshing
-            icon.name: "edit-none"
-            text: page.emptyText
+            visible: !page.busy && model.count === 0
+            icon.name: page.errorText ? "dialog-error" : "edit-none"
+            text: page.errorText || page.emptyText
+            explanation: page.errorDetail
+            helpfulAction: Kirigami.Action {
+                text: page.authProblem ? qsTr("Open Settings") : qsTr("Retry")
+                icon.name: page.authProblem ? "configure" : "view-refresh"
+                onTriggered: page.authProblem ? applicationWindow().go("settings") : page.load()
+            }
         }
 
         QQC2.BusyIndicator {
             anchors.centerIn: parent
-            running: ctl.state === "loading" && ctl.count === 0
+            running: page.busy && model.count === 0
             visible: running
         }
     }

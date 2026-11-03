@@ -5,32 +5,14 @@
 A native YouTube Music client written in **Rust**, **Qt 6** ([cxx-qt](https://github.com/KDAB/cxx-qt)) and **Kirigami**.
 No browser engine, no Electron, no FFmpeg, no system OpenSSL: networking is rustls and the optional audio engine is pure Rust.
 
-<p align="center">
-  <img src="docs/img/home.png" alt="Home: shelves of cards" width="49%">
-  <img src="docs/img/album.png" alt="An album page" width="49%">
-</p>
-<p align="center">
-  <img src="docs/img/lyrics.png" alt="Synced lyrics with karaoke fill" width="49%">
-  <img src="docs/img/artist.png" alt="An artist page with bio and Wikipedia link" width="49%">
-</p>
-
 ## Features
 
-- **Rich pages:** Home shelves, album / playlist / artist pages with a tinted hero, track lists, cards and round artist avatars. The artist bio is YouTube's own text, with a link to Wikipedia.
-- **Lyrics:** [LRCLIB](https://lrclib.net), NetEase and YouTube's plain lyrics are asked in parallel and **line-synced lyrics always win**. Big type, a karaoke fill between timestamps, gap dots in instrumentals, tap a line to seek. The source credit is the very last line. Each provider can be switched off; they only ever receive title, artist and duration.
-- **Downloads:** per song, album or playlist, plus opt-in *smart downloads* (liked songs, recently played, next in queue) within a storage limit (4 GB by default, configurable). Quality Best / Normal / Data saver, your own folder, and automatic pause on a metered connection or low battery. Downloaded songs play from disk and work offline.
-- **Audio:** the default player is Qt Multimedia; a **pure-Rust engine** (symphonia demux, Opus via [opus-rs](https://crates.io/crates/opus-rs), AAC, resampling, 10-band equalizer with presets and preamp, limiter, gapless, crossfade, loudness normalization) can be switched on in Settings.
-- **Queue:** drag to reorder, a ⋮ menu and right-click on every row.
-- **Player bar:** transport on the left, smooth sub-second progress, press it to open or close the full player.
-- **Mini-player and system tray**, MPRIS media keys on Linux, configurable keyboard shortcuts.
-- **Sign-in:** Settings → *Import from <browser>* (Chrome, Chromium, Brave, Vivaldi, Edge, Opera, Firefox, Zen, LibreWolf, Waterfox) or paste cookies. Enables Library, Liked music, History, personalised Home, likes and add-to-playlist, and **reports plays back to YouTube** so your history and recommendations stay right (Settings → Privacy turns it off).
-- **Settings:** one scrolling page with search; every change applies live and is saved to `config.toml` with your comments intact.
+- **Browse and play:** Home, Explore, Library, search, albums, playlists and artists; queue, shuffle, repeat, radio.
+- **Lyrics:** [LRCLIB](https://lrclib.net), NetEase and YouTube's plain lyrics are asked in parallel and line-synced lyrics always win. Each provider can be switched off; they only ever receive title, artist and duration.
+- **Sign-in:** Settings → *Import from <browser>* (Chrome, Chromium, Brave, Vivaldi, Edge, Opera, Firefox, Zen, LibreWolf, Waterfox) or paste cookies. Enables Library, Liked music, History, personalised Home, likes and add-to-playlist.
+- **Desktop integration:** MPRIS media keys on Linux; the queue, track and position are restored on launch.
 
-<p align="center">
-  <img src="docs/img/queue.png" alt="Up next queue" width="32%">
-  <img src="docs/img/settings.png" alt="Settings" width="32%">
-  <img src="docs/img/downloads.png" alt="Downloads" width="32%">
-</p>
+Working on the Rust side but **not yet in the interface** (they get added to the original look one at a time): downloads and offline playback, the pure-Rust audio engine with a 10-band equalizer, the mini-player and system tray, and reporting plays back to YouTube.
 
 ## Build and run
 

@@ -2,6 +2,7 @@
 import QtQuick
 import QtCore
 import org.kde.ytm
+import QtMultimedia
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 
@@ -21,31 +22,26 @@ Kirigami.ApplicationWindow {
     Connections {
         target: Backend
         function onLoggedInChanged() { root.pageCache = ({}) }
-        // A like YouTube refused: the heart was already put back; say why instead of failing silently.
-        function onLikeFailed(videoId, message) {
-            root.showPassiveNotification(qsTr("Couldn’t update your liked songs: %1").arg(message.split("\n\n")[0]), "long")
-        }
     }
-    // Audio playback goes through the Playback seam (see Playback.qml); the Rust Player resolves URLs and owns the queue.
+    // Playback lives in QtMultimedia; the Rust Player resolves URLs and owns the queue.
     property alias media: media
 
-    Playback {
+    MediaPlayer {
         id: media
         source: Player.source
-        nextSource: Player.nextSource
-        volume: Player.volume
-        autoplay: Player.autoplay
-        onFailed: message => Player.mediaFailed(message)
-        onPlayingChanged: root.syncMpris()
+        audioOutput: AudioOutput { volume: Math.pow(Player.volume, 2) }
+        onSourceChanged: if (source.toString() !== "" && Player.autoplay) play()
+        onErrorOccurred: (error, errorString) => Player.mediaFailed(errorString)
+        onPlaybackStateChanged: root.syncMpris()
         onDurationChanged: root.syncMpris()
-        onLoaded: {
-            if (Player.resumePos > 0) {
-                media.seek(Player.resumePos)
+        onMediaStatusChanged: {
+            if (mediaStatus === MediaPlayer.LoadedMedia && Player.resumePos > 0) {
+                position = Player.resumePos
                 Player.resumePos = 0
             }
-        }
-        onEnded: {
-            if (Player.repeat === 2) { media.seek(0); media.play() } else Player.next()
+            if (mediaStatus === MediaPlayer.EndOfMedia) {
+                if (Player.repeat === 2) { position = 0; play() } else Player.next()
+            }
         }
     }
 
@@ -64,23 +60,12 @@ Kirigami.ApplicationWindow {
     }
 
     function syncMpris() {
-        Player.syncMpris(media.playing, media.position, media.duration)
+        Player.syncMpris(media.playbackState === MediaPlayer.PlayingState, media.position, media.duration)
     }
     function previousTrack() {
-        if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.seek(0); else Player.previous()
+        if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.position = 0; else Player.previous()
     }
     Timer { interval: 1000; repeat: true; running: Player.hasTrack; onTriggered: root.syncMpris() }
-
-    // Report plays back to YouTube (history, recommendations). The rules (threshold, once per play, signed-in only,
-    // retries) all live in Rust (src/reporting.rs); this only tells it what is playing and how far along it is.
-    Connections {
-        target: Player
-        function onVideoIdChanged() { Reporter.trackChanged(Player.videoId) }
-    }
-    Timer {
-        interval: 1000; repeat: true; running: Player.hasTrack
-        onTriggered: Reporter.tick(Math.round(media.position), media.playing)
-    }
     Connections {
         target: Player
         // Media keys, KDE Connect, the Plasma media widget (MPRIS) – see src/mpris.rs
@@ -92,8 +77,8 @@ Kirigami.ApplicationWindow {
             case "stop": media.stop(); break
             case "next": Player.next(); break
             case "previous": root.previousTrack(); break
-            case "seek": media.seek(media.position + arg); break
-            case "setposition": media.seek(arg); break
+            case "seek": media.position = Math.max(0, media.position + arg); break
+            case "setposition": media.position = arg; break
             case "shuffle": Player.shuffle = arg !== 0; break
             case "repeat": Player.repeat = arg; break
             case "volume": Player.volume = arg / 1000; break
@@ -120,27 +105,14 @@ Kirigami.ApplicationWindow {
     }
     function togglePlay() {
         if (!Player.hasTrack) return
-        media.toggle()
+        if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play()
     }
 
-    // Keyboard shortcuts come from Settings → Shortcuts (config `[keys]`, delivered as JSON by AppConfig).
-    readonly property var keys: { try { return JSON.parse(AppConfig.shortcutsJson) } catch (e) { return ({}) } }
-    // A text field must keep Space and the arrow keys for itself.
-    readonly property bool typing: !!root.activeFocusItem && root.activeFocusItem.inputMethodHints !== undefined
-    function nudgeVolume(delta) { Player.volume = Math.max(0, Math.min(1, Player.volume + delta)) }
-
-    Shortcut { sequence: root.keys.fullscreen || ""; enabled: !!root.keys.fullscreen; onActivated: root.toggleFullScreen() }
+    Shortcut { sequences: ["F11", StandardKey.FullScreen]; onActivated: root.toggleFullScreen() }
     Shortcut { sequence: "Escape"; enabled: root.visibility === Window.FullScreen; onActivated: root.visibility = Window.Windowed }
-    Shortcut { sequence: root.keys.search || ""; enabled: !!root.keys.search; onActivated: root.focusSearch() }
-    Shortcut { sequence: root.keys.play_pause || ""; enabled: !!root.keys.play_pause && !root.typing; onActivated: root.togglePlay() }
-    Shortcut { sequence: root.keys.next || ""; enabled: !!root.keys.next; onActivated: Player.next() }
-    Shortcut { sequence: root.keys.previous || ""; enabled: !!root.keys.previous; onActivated: root.previousTrack() }
-    Shortcut { sequence: root.keys.now_playing || ""; enabled: !!root.keys.now_playing; onActivated: root.toggleNowPlaying() }
-    Shortcut { sequence: root.keys.lyrics || ""; enabled: !!root.keys.lyrics; onActivated: root.showLyrics() }
-    Shortcut { sequence: root.keys.volume_up || ""; enabled: !!root.keys.volume_up; onActivated: root.nudgeVolume(0.05) }
-    Shortcut { sequence: root.keys.volume_down || ""; enabled: !!root.keys.volume_down; onActivated: root.nudgeVolume(-0.05) }
-    Shortcut { sequence: root.keys.seek_forward || ""; enabled: !!root.keys.seek_forward && !root.typing; onActivated: media.seek(media.position + 5000) }
-    Shortcut { sequence: root.keys.seek_back || ""; enabled: !!root.keys.seek_back && !root.typing; onActivated: media.seek(media.position - 5000) }
+    Shortcut { sequences: [StandardKey.Find]; onActivated: root.focusSearch() }
+    Shortcut { sequence: "Ctrl+Right"; onActivated: Player.next() }
+    Shortcut { sequence: "Ctrl+Left"; onActivated: root.previousTrack() }
     Shortcut { sequence: "Media Play"; onActivated: root.togglePlay() }
     Shortcut { sequence: "Media Next"; onActivated: Player.next() }
     Shortcut { sequence: "Media Previous"; onActivated: root.previousTrack() }
@@ -151,21 +123,27 @@ Kirigami.ApplicationWindow {
     }
 
     function go(name) {
-        // The player opens *on top of* the current page (so closing it returns there); every other destination replaces the stack.
-        if (name === "queue") { showNowPlaying("queue"); return }
         pageStack.clear()
         switch (name) {
         case "home":
-            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Home"), target: "home", navName: "home"})
+            pageStack.push(itemsUrl, {title: qsTr("Home"), target: "home", reloadOnLogin: true})
             break
         case "explore":
-            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Explore"), target: "explore", navName: "explore"})
+            pageStack.push(itemsUrl, {title: qsTr("Explore"), target: "explore"})
             break
         case "library":
-            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Library"), target: "library", filter: "playlists", navName: "library"})
+            pageStack.push(itemsUrl, {
+                title: qsTr("Library"),
+                target: "library",
+                filter: "playlists",
+                chips: [[qsTr("Playlists"), "playlists"], [qsTr("Albums"), "albums"], [qsTr("Artists"), "artists"], [qsTr("Songs"), "songs"], [qsTr("History"), "history"]],
+                needsLogin: true,
+                searchable: false,
+                emptyText: qsTr("Nothing in your library yet")
+            })
             break
-        case "downloads":
-            pageStack.push(Qt.resolvedUrl("DownloadsPage.qml"), {navName: "downloads"})
+        case "queue":
+            showNowPlaying("queue")
             break
         case "settings":
             pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
@@ -181,9 +159,9 @@ Kirigami.ApplicationWindow {
     }
 
     function open(item) {
-        // Liked music is one long list of songs: it stays a dense list; albums, playlists and artists get the rich page.
-        const liked = item.kind === "playlist" && ["LIKED", "LM", "VLLM"].indexOf(item.browseId) >= 0
-        pageStack.push(liked ? itemsUrl : Qt.resolvedUrl("PageView.qml"), {title: item.title, target: item.kind + ":" + item.browseId})
+        pageStack.push(itemsUrl, {
+            title: item.title, target: item.kind + ":" + item.browseId, collection: true, searchable: false
+        })
     }
 
     function showNowPlaying(tab) {
@@ -194,57 +172,29 @@ Kirigami.ApplicationWindow {
     }
     function showLyrics() { showNowPlaying("lyrics") }
 
-    /// Pressing the bottom bar: while the player is open, go back to the page you were on; otherwise open the player.
-    function toggleNowPlaying() {
-        const cur = pageStack.currentItem
-        if (cur && cur.isNowPlaying && pageStack.depth > 1) pageStack.pop()
-        else showNowPlaying("queue")
-    }
-
     function addToPlaylist(item) {
         addDialog.song = item
         addDialog.open()
     }
     AddToPlaylistDialog { id: addDialog }
 
-    globalDrawer: NavDrawer {}
+    globalDrawer: Kirigami.GlobalDrawer {
+        title: qsTr("YT Music")
+        titleIcon: "multimedia-audio-player"
+        actions: [
+            Kirigami.Action { text: qsTr("Home"); icon.name: "go-home"; onTriggered: root.go("home") },
+            Kirigami.Action { text: qsTr("Explore"); icon.name: "view-list-icons"; onTriggered: root.go("explore") },
+            Kirigami.Action { text: qsTr("Library"); icon.name: "folder-music"; onTriggered: root.go("library") },
+            Kirigami.Action { text: qsTr("Now Playing"); icon.name: "media-playback-start"; enabled: Player.hasTrack; onTriggered: root.showNowPlaying("queue") },
+            Kirigami.Action { text: qsTr("Queue"); icon.name: "view-media-playlist"; onTriggered: root.go("queue") },
+            Kirigami.Action { text: qsTr("Settings"); icon.name: "configure"; onTriggered: root.go("settings") }
+            , Kirigami.Action { text: root.visibility === Window.FullScreen ? qsTr("Exit Full Screen") : qsTr("Full Screen"); icon.name: root.visibility === Window.FullScreen ? "view-restore" : "view-fullscreen"; onTriggered: root.toggleFullScreen() }
+        ]
+    }
 
     footer: NowPlayingBar {}
 
-    // ---- mini-player + system tray (W9) ----
-    MiniPlayer { id: mini }
-    TrayController { id: trayController; mini: mini }
-    function toggleMiniPlayer() { mini.toggle() }
-    Shortcut {
-        sequence: AppConfig.keyMiniPlayer
-        enabled: AppConfig.keyMiniPlayer.length > 0
-        onActivated: root.toggleMiniPlayer()
-    }
-    // With `window.close_to_tray` on (and a tray that exists) closing the window only hides it; music keeps playing
-    // and the tray's Quit really quits. Otherwise closing quits as before, taking the mini-player with it.
-    onClosing: close => {
-        if (AppConfig.closeToTray && trayController.available) {
-            close.accepted = false
-            root.hide()
-        } else {
-            mini.visible = false
-        }
-    }
-
-    // Appearance → Theme: "light" / "dark" ask Qt for that colour scheme, "system" follows the desktop. This only has
-    // an effect where the active style honours the request; the KDE desktop style takes its colours from the platform
-    // colour scheme (Plasma's own setting), so there the desktop still decides.
-    function applyTheme() {
-        switch (AppConfig.theme) {
-        case "light": Qt.styleHints.colorScheme = Qt.Light; break
-        case "dark": Qt.styleHints.colorScheme = Qt.Dark; break
-        default: Qt.styleHints.colorScheme = Qt.Unknown // back to what the desktop says
-        }
-    }
-    Connections { target: AppConfig; function onThemeChanged() { root.applyTheme() } }
-
     Component.onCompleted: {
-        applyTheme()
         pageStack.columnView.columnResizeMode = Kirigami.ColumnView.SingleColumn
         Player.startMpris()
         Player.restoreSession()
