@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! The handful of settings the QML side needs, read from `config.toml`.
 use crate::config;
+use cxx_qt_lib::QString;
 
 #[cxx_qt::bridge]
 pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -24,6 +30,12 @@ pub mod qobject {
         #[qproperty(bool, lyrics_karaoke)]
         #[qproperty(bool, lyrics_gap_dots)]
         #[qproperty(bool, lyrics_tint)]
+        // audio engine ("rust" or "qt"), read-only start values; the EQ's own state lives in the `Equalizer` singleton
+        #[qproperty(QString, audio_engine)]
+        #[qproperty(i32, audio_crossfade_ms)]
+        #[qproperty(bool, audio_normalize)]
+        #[qproperty(bool, audio_gapless)]
+        #[qproperty(QString, audio_output_device)]
         type AppConfig = super::AppConfigRust;
     }
 }
@@ -42,6 +54,11 @@ pub struct AppConfigRust {
     lyrics_karaoke: bool,
     lyrics_gap_dots: bool,
     lyrics_tint: bool,
+    audio_engine: QString,
+    audio_crossfade_ms: i32,
+    audio_normalize: bool,
+    audio_gapless: bool,
+    audio_output_device: QString,
 }
 
 impl Default for AppConfigRust {
@@ -62,6 +79,11 @@ impl Default for AppConfigRust {
             lyrics_karaoke: c.lyrics.karaoke,
             lyrics_gap_dots: c.lyrics.gap_dots,
             lyrics_tint: c.lyrics.tint_with_accent,
+            audio_engine: QString::from(c.audio.engine.as_str()),
+            audio_crossfade_ms: ms(c.audio.crossfade_ms).min(12_000),
+            audio_normalize: c.audio.normalize,
+            audio_gapless: c.audio.gapless,
+            audio_output_device: QString::from(c.audio.output_device.as_str()),
         }
     }
 }

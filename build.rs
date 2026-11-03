@@ -9,6 +9,9 @@ fn main() {
         "qml/NowPlayingBar.qml",
         "qml/PanelSwitcher.qml",
         "qml/Playback.qml",
+        "qml/RustPlayback.qml",
+        "qml/QtPlayback.qml",
+        "qml/EqualizerPanel.qml",
         "qml/QueuePanel.qml",
         "qml/LyricsPanel.qml",
         "qml/NowPlayingPage.qml",
@@ -17,6 +20,15 @@ fn main() {
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files([
+        "src/backend.rs",
+        "src/player.rs",
+        "src/appconfig.rs",
+        "src/clock.rs",
+        "src/accent.rs",
+        "src/reporting.rs",
+        "src/audio_engine.rs",
+        "src/audio_eq.rs",
+    ])
     .build();
 }

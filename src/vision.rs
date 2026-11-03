@@ -135,6 +135,27 @@ pub struct AudioFormat {
     pub sample_rate: Option<u32>,
 }
 
+static LOUDNESS: Mutex<Option<std::collections::HashMap<String, f64>>> = Mutex::new(None);
+/// Remember at most this many tracks' loudness (a listening session is far smaller; the map is just cleared when full).
+const LOUDNESS_CAP: usize = 4096;
+
+/// YouTube's loudness (dB relative to its reference) of a video whose formats were resolved earlier this run.
+/// The audio engine uses it for normalization.
+pub fn loudness(video_id: &str) -> Option<f64> {
+    LOUDNESS.lock().ok()?.as_ref()?.get(video_id).copied()
+}
+
+fn remember_loudness(video_id: &str, formats: &[AudioFormat]) {
+    let Some(db) = formats.iter().find_map(|f| f.loudness_db).filter(|d| d.is_finite()) else { return };
+    if let Ok(mut m) = LOUDNESS.lock() {
+        let map = m.get_or_insert_default();
+        if map.len() >= LOUDNESS_CAP {
+            map.clear();
+        }
+        map.insert(video_id.to_owned(), db);
+    }
+}
+
 /// Every plain-URL audio format of a video. A stale visitor id is the usual reason for a refusal,
 /// so one failure retries with a fresh session.
 pub async fn audio_formats(video_id: &str) -> Result<Vec<AudioFormat>, String> {
@@ -196,6 +217,7 @@ async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> 
     if parsed.is_empty() {
         return Err("visionOS: no audio format with a plain URL".to_owned());
     }
+    remember_loudness(video_id, &parsed);
     Ok(parsed)
 }
 
@@ -305,6 +327,16 @@ mod tests {
         // audio_url() = highest bitrate, any codec: what the app has always played
         let f = parse_formats(&sample());
         assert_eq!(pick_format(&f, Quality::Best, None).unwrap().mime, "audio/webm; codecs=\"opus\"");
+    }
+
+    #[test]
+    fn loudness_is_remembered_per_video() {
+        let f = parse_formats(&sample());
+        remember_loudness("loud-test-id", &f);
+        assert_eq!(loudness("loud-test-id"), Some(-3.5));
+        assert_eq!(loudness("never-seen"), None);
+        remember_loudness("no-loudness", &parse_formats(&sample()[2..3]));
+        assert_eq!(loudness("no-loudness"), None);
     }
 
     #[test]
