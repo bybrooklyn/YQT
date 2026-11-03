@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import QtQuick.Effects
+import org.kde.ytm
 import org.kde.kirigami as Kirigami
 
 // Album/track cover that never looks broken: a neutral placeholder shows while the image loads, when there is
@@ -21,6 +22,22 @@ Item {
     property string placeholderIcon: "media-optical-audio"
     readonly property bool ready: img.status === Image.Ready
     readonly property real _radius: Math.min(width, height) * Math.max(0, Math.min(radiusPercent, 50)) / 100
+
+    // http(s) covers go through the cover cache: the local copy when there is one (so covers work offline and
+    // load fast), otherwise the original URL while the cache fetches it in the background.
+    property string _resolved: ""
+    function _resolve() {
+        _resolved = (source.indexOf("https://") === 0) ? Covers.url(source) : source
+    }
+    onSourceChanged: _resolve()
+    Component.onCompleted: _resolve()
+    Connections {
+        target: Covers
+        // a new cover arrived: switch over only if this one has not loaded yet (no flicker for loaded images)
+        function onRevisionChanged() {
+            if (img.status !== Image.Ready && root.source.indexOf("https://") === 0) root._resolve()
+        }
+    }
 
     // everything that must be clipped to the rounded shape lives in `content`
     Item {
@@ -50,7 +67,7 @@ Item {
         Image {
             id: img
             anchors.fill: parent
-            source: root.source
+            source: root._resolved
             sourceSize: Qt.size(root.decode, root.decode)
             asynchronous: true
             cache: true
