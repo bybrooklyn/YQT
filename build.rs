@@ -14,9 +14,15 @@ fn main() {
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
+        "qml/TransportControls.qml",
+        "qml/MiniPlayer.qml",
+        "qml/MiniPlayerContent.qml",
+        "qml/TrayController.qml",
     ]))
+    // bundled fallback tray icon (used when the desktop icon theme has no `multimedia-audio-player`)
+    .qrc_resources(["qml/icons/ytm-tray.svg"])
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs", "src/tray.rs"])
     .build();
 }

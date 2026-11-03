@@ -27,6 +27,7 @@ mod reporting;
 mod security;
 mod session;
 mod state;
+mod tray;
 mod vision;
 mod ytapi;
 

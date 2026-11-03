@@ -4,6 +4,11 @@ use crate::config;
 
 #[cxx_qt::bridge]
 pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+    }
+
     #[auto_cxx_name]
     extern "RustQt" {
         #[qobject]
@@ -24,6 +29,11 @@ pub mod qobject {
         #[qproperty(bool, lyrics_karaoke)]
         #[qproperty(bool, lyrics_gap_dots)]
         #[qproperty(bool, lyrics_tint)]
+        // window / tray
+        #[qproperty(bool, close_to_tray)]
+        #[qproperty(bool, mini_always_on_top)]
+        #[qproperty(bool, remember_geometry)]
+        #[qproperty(QString, key_mini_player)]
         type AppConfig = super::AppConfigRust;
     }
 }
@@ -42,6 +52,10 @@ pub struct AppConfigRust {
     lyrics_karaoke: bool,
     lyrics_gap_dots: bool,
     lyrics_tint: bool,
+    close_to_tray: bool,
+    mini_always_on_top: bool,
+    remember_geometry: bool,
+    key_mini_player: cxx_qt_lib::QString,
 }
 
 impl Default for AppConfigRust {
@@ -62,6 +76,10 @@ impl Default for AppConfigRust {
             lyrics_karaoke: c.lyrics.karaoke,
             lyrics_gap_dots: c.lyrics.gap_dots,
             lyrics_tint: c.lyrics.tint_with_accent,
+            close_to_tray: c.window.close_to_tray,
+            mini_always_on_top: c.window.mini_always_on_top,
+            remember_geometry: c.window.remember_geometry,
+            key_mini_player: cxx_qt_lib::QString::from(c.keys.mini_player.as_str()),
         }
     }
 }
