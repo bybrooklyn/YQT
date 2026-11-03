@@ -143,21 +143,13 @@ Kirigami.ApplicationWindow {
         pageStack.clear()
         switch (name) {
         case "home":
-            pageStack.push(itemsUrl, {title: qsTr("Home"), target: "home", reloadOnLogin: true})
+            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Home"), target: "home", navName: "home"})
             break
         case "explore":
-            pageStack.push(itemsUrl, {title: qsTr("Explore"), target: "explore"})
+            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Explore"), target: "explore", navName: "explore"})
             break
         case "library":
-            pageStack.push(itemsUrl, {
-                title: qsTr("Library"),
-                target: "library",
-                filter: "playlists",
-                chips: [[qsTr("Playlists"), "playlists"], [qsTr("Albums"), "albums"], [qsTr("Artists"), "artists"], [qsTr("Songs"), "songs"], [qsTr("History"), "history"]],
-                needsLogin: true,
-                searchable: false,
-                emptyText: qsTr("Nothing in your library yet")
-            })
+            pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Library"), target: "library", filter: "playlists", navName: "library"})
             break
         case "settings":
             pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
@@ -173,9 +165,9 @@ Kirigami.ApplicationWindow {
     }
 
     function open(item) {
-        pageStack.push(itemsUrl, {
-            title: item.title, target: item.kind + ":" + item.browseId, collection: true, searchable: false
-        })
+        // Liked music is one long list of songs: it stays a dense list; albums, playlists and artists get the rich page.
+        const liked = item.kind === "playlist" && ["LIKED", "LM", "VLLM"].indexOf(item.browseId) >= 0
+        pageStack.push(liked ? itemsUrl : Qt.resolvedUrl("PageView.qml"), {title: item.title, target: item.kind + ":" + item.browseId})
     }
 
     function showNowPlaying(tab) {

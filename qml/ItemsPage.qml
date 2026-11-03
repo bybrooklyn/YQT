@@ -46,51 +46,13 @@ Kirigami.ScrollablePage {
         visible: ctl.searchable || ctl.chipLabels.length > 0
         spacing: 0
 
-        Kirigami.SearchField {
+        SearchBar {
             id: searchField
             visible: ctl.searchable
+            controller: ctl
+            query: page.query
             Layout.fillWidth: true
             Layout.margins: Kirigami.Units.smallSpacing
-            placeholderText: qsTr("Search songs, albums, artists…")
-            autoAccept: false
-            Component.onCompleted: text = page.query
-            onAccepted: {
-                suggestPopup.close()
-                if (text.trim() !== page.query) applicationWindow().search(text)
-            }
-            onTextEdited: suggestTimer.restart()
-            onActiveFocusChanged: if (!activeFocus) suggestPopup.close()
-
-            Timer {
-                id: suggestTimer
-                interval: AppConfig.suggestDebounceMs
-                onTriggered: ctl.suggest(searchField.text)
-            }
-            Connections {
-                target: ctl
-                function onSuggestionsChanged() { if (ctl.suggestions.length > 0 && searchField.activeFocus) suggestPopup.open(); else suggestPopup.close() }
-            }
-
-            QQC2.Popup {
-                id: suggestPopup
-                y: searchField.height
-                width: searchField.width
-                padding: 0
-                focus: false
-                closePolicy: QQC2.Popup.CloseOnEscape
-                contentItem: ListView {
-                    implicitHeight: Math.min(contentHeight, Kirigami.Units.gridUnit * 14)
-                    model: ctl.suggestions
-                    clip: true
-                    delegate: QQC2.ItemDelegate {
-                        required property string modelData
-                        width: ListView.view.width
-                        text: modelData
-                        icon.name: "search"
-                        onClicked: { suggestPopup.close(); searchField.text = modelData; applicationWindow().search(modelData) }
-                    }
-                }
-            }
         }
         RowLayout {
             visible: ctl.chipLabels.length > 0

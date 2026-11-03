@@ -31,6 +31,8 @@ pub struct Row {
     pub item: Item,
     pub section_id: String,
     pub section: String,
+    /// The small line above a shelf's title ("More like" / the song); only the rich pages show it.
+    pub section_subtitle: String,
     pub style: SectionStyle,
 }
 
@@ -72,7 +74,13 @@ pub fn rows_from_sections(sections: &[Section]) -> Vec<Row> {
     sections
         .iter()
         .flat_map(|s| {
-            s.items.iter().map(|item| Row { item: item.clone(), section_id: s.id.clone(), section: s.title.clone(), style: s.style })
+            s.items.iter().map(|item| Row {
+                item: item.clone(),
+                section_id: s.id.clone(),
+                section: s.title.clone(),
+                section_subtitle: s.subtitle.clone(),
+                style: s.style,
+            })
         })
         .collect()
 }
