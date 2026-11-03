@@ -17,8 +17,19 @@ Item {
     property int fillMode: Image.PreserveAspectCrop
     /// Corner radius as a percentage of the shorter side (e.g. 5 = slightly rounded, 50 = circle).
     property real radiusPercent: 0
-    /// Icon shown in the placeholder (`media-optical-audio` for songs/albums; callers can pass another per kind).
-    property string placeholderIcon: "media-optical-audio"
+    /// What the art stands for: `song`, `album`, `artist`, `playlist` or `liked` (Liked music). Decides the
+    /// placeholder, which is always drawn so an art slot is never blank. Rows get it from the `placeholder` role.
+    property string kind: "song"
+    /// Icon shown in the placeholder; follows `kind` unless a caller sets it.
+    property string placeholderIcon: {
+        switch (kind) {
+        case "artist": return "view-media-artist"
+        case "playlist": return "view-media-playlist"
+        case "liked": return "starred-symbolic"
+        default: return "media-optical-audio"   // song, album
+        }
+    }
+    readonly property bool liked: kind === "liked"
     readonly property bool ready: img.status === Image.Ready
     readonly property real _radius: Math.min(width, height) * Math.max(0, Math.min(radiusPercent, 50)) / 100
 
@@ -37,13 +48,24 @@ Item {
         Rectangle {
             anchors.fill: parent
             color: Kirigami.Theme.alternateBackgroundColor
+            // Liked music: the purple "thumbs-up" look of YouTube's own cover
+            gradient: root.liked ? likedGradient : null
+
+            Gradient {
+                id: likedGradient
+                orientation: Gradient.Vertical
+                GradientStop { position: 0.0; color: "#8e5bd9" }
+                GradientStop { position: 1.0; color: "#4a2a8f" }
+            }
 
             Kirigami.Icon {
                 anchors.centerIn: parent
                 width: Math.min(parent.width, parent.height) * 0.5
                 height: width
                 source: root.placeholderIcon
-                opacity: 0.35
+                color: root.liked ? "white" : Kirigami.Theme.textColor
+                isMask: root.liked
+                opacity: root.liked ? 0.95 : 0.35
             }
         }
 

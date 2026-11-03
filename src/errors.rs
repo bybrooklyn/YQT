@@ -59,7 +59,7 @@ impl ErrorKind {
             ErrorKind::Parse => "YouTube may have changed something. Try again later.",
             ErrorKind::NotFound | ErrorKind::Unavailable => "",
             ErrorKind::RateLimit => "Wait a minute before trying again.",
-            ErrorKind::Offline => "You're offline. Downloaded music still plays.",
+            ErrorKind::Offline => "Downloaded music still plays.",
             ErrorKind::Storage => "Check free disk space and folder permissions.",
             ErrorKind::Config => "Fix or delete that setting in config.toml.",
             ErrorKind::Internal => "",
@@ -177,6 +177,195 @@ impl AppError {
             self.detail,
             env!("CARGO_PKG_VERSION")
         )
+    }
+}
+
+// ---- severity, retry schedule, offline -------------------------------------------------------------------------
+
+/// How loudly a failure is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    /// In place of the content that could not be shown (a page that failed to load).
+    Inline,
+    /// A passing notice for something in the background or a one-off action (a like that didn't go through).
+    Toast,
+    /// The user has to do something before anything works (sign in again, fix the config).
+    Blocking,
+}
+
+impl ErrorKind {
+    pub fn severity(self) -> Severity {
+        match self {
+            ErrorKind::Auth | ErrorKind::Config => Severity::Blocking,
+            ErrorKind::RateLimit | ErrorKind::Storage | ErrorKind::Internal => Severity::Toast,
+            ErrorKind::Network | ErrorKind::Parse | ErrorKind::NotFound | ErrorKind::Unavailable | ErrorKind::Offline => Severity::Inline,
+        }
+    }
+
+    /// Stable lowercase name for QML (`"network"`, `"auth"`, …).
+    pub fn name(self) -> &'static str {
+        match self {
+            ErrorKind::Network => "network",
+            ErrorKind::Auth => "auth",
+            ErrorKind::Parse => "parse",
+            ErrorKind::NotFound => "notfound",
+            ErrorKind::RateLimit => "ratelimit",
+            ErrorKind::Offline => "offline",
+            ErrorKind::Unavailable => "unavailable",
+            ErrorKind::Storage => "storage",
+            ErrorKind::Config => "config",
+            ErrorKind::Internal => "internal",
+        }
+    }
+}
+
+impl Retry {
+    /// `"never"`, `"manual"` or `"auto"` for QML.
+    pub fn name(self) -> &'static str {
+        match self {
+            Retry::Never => "never",
+            Retry::Manual => "manual",
+            Retry::Auto { .. } => "auto",
+        }
+    }
+
+    /// The delay before the next automatic attempt, given how many automatic attempts were already made.
+    /// `None` once they are used up (the user then gets a Retry button) or when the policy is not automatic.
+    pub fn next_auto_delay_ms(self, attempts_made: u32) -> Option<u64> {
+        match self {
+            Retry::Auto { after_ms, max_attempts } if attempts_made < max_attempts => Some(after_ms),
+            _ => None,
+        }
+    }
+
+    /// Does the UI offer a Retry button?
+    pub fn offers_button(self) -> bool {
+        !matches!(self, Retry::Never)
+    }
+}
+
+/// Source of truth for "is there a network connection at all". **Integration point:** the connectivity stream
+/// implements this (e.g. its `Connectivity` singleton) and calls [`set_connectivity`] once at start-up. Until then
+/// the app assumes it is online and network failures stay `Network`.
+pub trait Connectivity: Send + Sync {
+    fn online(&self) -> bool;
+}
+
+static CONNECTIVITY: std::sync::RwLock<Option<Box<dyn Connectivity>>> = std::sync::RwLock::new(None);
+
+pub fn set_connectivity(c: Box<dyn Connectivity>) {
+    *CONNECTIVITY.write().unwrap() = Some(c);
+}
+
+pub fn is_online() -> bool {
+    CONNECTIVITY.read().unwrap().as_ref().is_none_or(|c| c.online())
+}
+
+impl AppError {
+    /// No connection at all (downloaded music still works).
+    pub fn offline(detail: impl Into<String>) -> AppError {
+        AppError::new(ErrorKind::Offline, "You're offline.", detail)
+    }
+
+    /// A network failure while the device is known to be offline is an `Offline` error, with its own advice.
+    pub fn for_connectivity(self, online: bool) -> AppError {
+        if online || self.kind != ErrorKind::Network {
+            self
+        } else {
+            AppError::offline(self.detail)
+        }
+    }
+
+    /// "Copy details" text with anything secret-looking masked.
+    pub fn diagnostics_redacted(&self) -> String {
+        crate::logging::redact(&self.diagnostics())
+    }
+}
+
+// ---- toasts -----------------------------------------------------------------------------------------------------
+
+#[cxx_qt::bridge]
+pub mod qobject {
+    unsafe extern "C++" {
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
+    }
+
+    #[auto_cxx_name]
+    extern "RustQt" {
+        /// Passing notices for failures that don't replace a view. QML shows them (Main.qml connects `toast`).
+        #[qobject]
+        #[qml_element]
+        #[qml_singleton]
+        #[qproperty(QString, last_headline)]
+        #[qproperty(QString, last_hint)]
+        #[qproperty(QString, last_id)]
+        #[qproperty(QString, last_diagnostics)] // redacted, for a "Copy details" action
+        type ErrorCenter = super::ErrorCenterRust;
+
+        /// Report an error from QML (`kind` is one of the `ErrorKind` names, e.g. "network").
+        #[qinvokable]
+        fn report(self: Pin<&mut ErrorCenter>, headline: &QString, detail: &QString, kind: &QString);
+
+        #[qsignal]
+        fn toast(self: Pin<&mut ErrorCenter>, headline: QString, hint: QString, id: QString);
+    }
+
+    impl cxx_qt::Threading for ErrorCenter {}
+    impl cxx_qt::Initialize for ErrorCenter {}
+}
+
+use core::pin::Pin;
+use cxx_qt::Threading;
+use cxx_qt_lib::QString;
+
+#[derive(Default)]
+pub struct ErrorCenterRust {
+    last_headline: QString,
+    last_hint: QString,
+    last_id: QString,
+    last_diagnostics: QString,
+}
+
+static CENTER: std::sync::Mutex<Option<cxx_qt::CxxQtThread<qobject::ErrorCenter>>> = std::sync::Mutex::new(None);
+
+impl cxx_qt::Initialize for qobject::ErrorCenter {
+    fn initialize(self: Pin<&mut Self>) {
+        *CENTER.lock().unwrap() = Some(self.qt_thread());
+    }
+}
+
+/// Show `e` as a toast from anywhere in Rust (any thread). Dropped silently until the QML side exists.
+pub fn toast(e: &AppError) {
+    let e = e.clone();
+    if let Some(th) = CENTER.lock().unwrap().as_ref() {
+        let _ = th.queue(move |c| c.show(&e));
+    }
+}
+
+impl qobject::ErrorCenter {
+    fn show(mut self: Pin<&mut Self>, e: &AppError) {
+        let (h, hint, id) = (QString::from(&e.headline), QString::from(&e.hint), QString::from(&e.id));
+        self.as_mut().set_last_headline(h.clone());
+        self.as_mut().set_last_hint(hint.clone());
+        self.as_mut().set_last_id(id.clone());
+        self.as_mut().set_last_diagnostics(QString::from(&e.diagnostics_redacted()));
+        self.toast(h, hint, id);
+    }
+
+    fn report(self: Pin<&mut Self>, headline: &QString, detail: &QString, kind: &QString) {
+        let kind = match kind.to_string().as_str() {
+            "network" => ErrorKind::Network,
+            "auth" => ErrorKind::Auth,
+            "offline" => ErrorKind::Offline,
+            "ratelimit" => ErrorKind::RateLimit,
+            "notfound" => ErrorKind::NotFound,
+            "unavailable" => ErrorKind::Unavailable,
+            "storage" => ErrorKind::Storage,
+            _ => ErrorKind::Internal,
+        };
+        self.show(&AppError::new(kind, headline.to_string(), detail.to_string()));
     }
 }
 
@@ -300,6 +489,77 @@ mod tests {
         assert_eq!(v["kind"], "offline");
         assert_eq!(v["retry"]["policy"], "auto");
         assert!(v.get("headline").is_some() && v.get("id").is_some());
+    }
+
+    #[test]
+    fn severity_table() {
+        use ErrorKind::*;
+        let table = [
+            (Auth, Severity::Blocking),
+            (Config, Severity::Blocking),
+            (RateLimit, Severity::Toast),
+            (Storage, Severity::Toast),
+            (Internal, Severity::Toast),
+            (Network, Severity::Inline),
+            (Parse, Severity::Inline),
+            (NotFound, Severity::Inline),
+            (Unavailable, Severity::Inline),
+            (Offline, Severity::Inline),
+        ];
+        for (kind, sev) in table {
+            assert_eq!(kind.severity(), sev, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn kind_and_retry_names_are_stable_for_qml() {
+        assert_eq!(ErrorKind::NotFound.name(), "notfound");
+        assert_eq!(ErrorKind::Offline.name(), "offline");
+        assert_eq!(Retry::Never.name(), "never");
+        assert_eq!(Retry::Manual.name(), "manual");
+        assert_eq!(Retry::Auto { after_ms: 1, max_attempts: 1 }.name(), "auto");
+    }
+
+    #[test]
+    fn automatic_retries_are_bounded_then_fall_back_to_the_button() {
+        let r = Retry::Auto { after_ms: 1_500, max_attempts: 2 };
+        assert_eq!(r.next_auto_delay_ms(0), Some(1_500));
+        assert_eq!(r.next_auto_delay_ms(1), Some(1_500));
+        assert_eq!(r.next_auto_delay_ms(2), None);
+        assert_eq!(Retry::Manual.next_auto_delay_ms(0), None);
+        assert_eq!(Retry::Never.next_auto_delay_ms(0), None);
+        assert!(Retry::Manual.offers_button() && r.offers_button() && !Retry::Never.offers_button());
+    }
+
+    #[test]
+    fn offline_is_its_own_error_with_downloads_advice() {
+        let e = AppError::offline("dns");
+        assert_eq!(e.kind, ErrorKind::Offline);
+        assert!(e.hint.contains("Downloaded"));
+        assert!(matches!(e.retry, Retry::Auto { .. }));
+    }
+
+    #[test]
+    fn network_errors_become_offline_only_when_the_device_is_offline() {
+        let net = AppError::from_rustypipe(&Error::Http("dns".into()), false);
+        assert_eq!(net.clone().for_connectivity(true).kind, ErrorKind::Network);
+        let off = net.clone().for_connectivity(false);
+        assert_eq!((off.kind, off.detail.as_str()), (ErrorKind::Offline, net.detail.as_str()));
+        let parse = AppError::new(ErrorKind::Parse, "x", "y");
+        assert_eq!(parse.for_connectivity(false).kind, ErrorKind::Parse, "only connection failures are rewritten");
+    }
+
+    #[test]
+    fn without_a_connectivity_source_the_app_assumes_it_is_online() {
+        assert!(is_online());
+    }
+
+    #[test]
+    fn copied_details_are_redacted() {
+        let e = AppError::new(ErrorKind::Internal, "Failed", "Cookie: SAPISID=abcdef123456; other=1");
+        let d = e.diagnostics_redacted();
+        assert!(!d.contains("abcdef123456"), "{d}");
+        assert!(d.contains(&e.id));
     }
 
     #[test]

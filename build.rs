@@ -5,6 +5,7 @@ fn main() {
     CxxQtBuilder::new_qml_module(QmlModule::new("org.kde.ytm").qml_files([
         "qml/Main.qml",
         "qml/CoverImage.qml",
+        "qml/ErrorView.qml",
         "qml/ItemsPage.qml",
         "qml/NowPlayingBar.qml",
         "qml/PanelSwitcher.qml",
@@ -17,6 +18,16 @@ fn main() {
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files([
+        "src/backend.rs",
+        "src/player.rs",
+        "src/appconfig.rs",
+        "src/clock.rs",
+        "src/accent.rs",
+        "src/reporting.rs",
+        "src/queuemodel.rs",
+        "src/page.rs",
+        "src/errors.rs",
+    ])
     .build();
 }
