@@ -431,4 +431,52 @@ mod tests {
         eq.process(&mut buf);
         assert!(buf.iter().all(|v| v.is_finite()));
     }
+
+    /// Dev report: renders a 20 Hz - 20 kHz log sweep through the EQ ("Rock" preset) into a WAV and prints the
+    /// measured gain at every band centre next to the setting and the analytic curve.
+    /// `YTM_SWEEP_OUT=<dir> cargo test -- --ignored --nocapture dev_eq_sweep_report`
+    #[test]
+    #[ignore]
+    fn dev_eq_sweep_report() {
+        let dir = std::path::PathBuf::from(std::env::var_os("YTM_SWEEP_OUT").expect("set YTM_SWEEP_OUT to a directory"));
+        let fs = 48_000.0;
+        let rock = crate::audio::presets::builtin("rock").unwrap();
+        let p = EqParams { enabled: true, preamp_db: rock.preamp_db, bands_db: rock.bands_db, limiter: true };
+        // the sweep
+        let secs = 12.0;
+        let (f0, f1) = (20.0f64, 20_000.0f64);
+        let n = (fs * secs) as usize;
+        let k = (f1 / f0).ln();
+        let sweep: Vec<f32> = (0..n)
+            .flat_map(|i| {
+                let t = i as f64 / fs;
+                let phase = 2.0 * PI * f0 * secs / k * ((t / secs * k).exp() - 1.0);
+                let v = (0.25 * phase.sin()) as f32;
+                [v, v]
+            })
+            .collect();
+        let mut out = sweep.clone();
+        let mut eq = EqProcessor::new(fs);
+        eq.set_params(&p);
+        eq.process(&mut out);
+        crate::audio::output::write_wav(&dir.join("sweep_flat.wav"), 48_000, &sweep).unwrap();
+        crate::audio::output::write_wav(&dir.join("sweep_rock.wav"), 48_000, &out).unwrap();
+        println!("wrote {}/sweep_flat.wav and sweep_rock.wav (Rock: preamp {} dB, bands {:?})", dir.display(), p.preamp_db, p.bands_db);
+        println!("band     set(dB)  measured(dB)  analytic(dB)   single-band +9 dB test (measured)");
+        let analytic = response_db(&p, &FREQS, fs);
+        for i in 0..BANDS {
+            let m = measured_db(&p, FREQS[i], fs);
+            let mut one = [0.0; BANDS];
+            one[i] = 9.0;
+            let single = measured_db(&EqParams { enabled: true, bands_db: one, ..Default::default() }, FREQS[i], fs);
+            println!(
+                "{:>6} Hz  {:+6.1}   {:+8.2}      {:+8.2}        {:+7.2}",
+                FREQS[i],
+                p.bands_db[i] + p.preamp_db,
+                m,
+                analytic[i],
+                single
+            );
+        }
+    }
 }

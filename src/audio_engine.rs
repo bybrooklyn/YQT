@@ -122,6 +122,11 @@ impl Drop for AudioEngineRust {
     }
 }
 
+/// The engine plays what the app's own stream proxy serves (loopback only), never arbitrary URLs or file paths.
+fn is_local_stream(url: &str) -> bool {
+    ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"].iter().any(|p| url.starts_with(p))
+}
+
 fn backend_for(device: &str) -> Backend {
     // Dev/test switch: run the whole pipeline without opening a sound device.
     if std::env::var_os("YTM_AUDIO_NULL").is_some() {
@@ -178,6 +183,11 @@ impl qobject::AudioEngine {
         let url = url.to_string();
         if url.is_empty() {
             return self.stop();
+        }
+        if !is_local_stream(&url) {
+            let msg = QString::from("refusing to play a stream that is not served by the local proxy");
+            self.as_mut().set_error(msg.clone());
+            return self.failed(msg);
         }
         {
             let me = self.as_mut().rust_mut().get_mut();
@@ -249,7 +259,7 @@ impl qobject::AudioEngine {
 
     fn set_next(mut self: Pin<&mut Self>, url: &QString) {
         let url = url.to_string();
-        let next = (!url.is_empty()).then_some(url);
+        let next = (!url.is_empty() && is_local_stream(&url)).then_some(url);
         self.as_mut().rust_mut().get_mut().want_next = next.clone();
         if let Some(e) = &self.rust().engine {
             e.set_next(next.as_deref());
@@ -334,7 +344,7 @@ fn spawn_poller(th: cxx_qt::CxxQtThread<qobject::AudioEngine>, status: Status, r
                 status.set_playing(false);
             }
             let (pos, dur, play, load) = (status.position_ms(), status.duration_ms(), status.playing(), status.loading());
-            let pos_due = pos != last_pos && (last_pos_at.elapsed() >= Duration::from_millis(90) || !play || (pos - last_pos).abs() > 400);
+            let pos_due = pos != last_pos && (last_pos_at.elapsed() >= Duration::from_millis(90) || !play || pos.abs_diff(last_pos) > 400);
             if pos_due || (dur != last_dur && dur != 0) || play != last_play || load != last_load {
                 if pos_due {
                     (last_pos, last_pos_at) = (pos, std::time::Instant::now());
@@ -355,4 +365,26 @@ fn spawn_poller(th: cxx_qt::CxxQtThread<qobject::AudioEngine>, status: Status, r
             std::thread::sleep(Duration::from_millis(30));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_local_stream;
+
+    #[test]
+    fn only_loopback_proxy_urls_are_playable() {
+        assert!(is_local_stream("http://127.0.0.1:41234/t/abc/dQw4w9WgXcQ"));
+        assert!(is_local_stream("http://localhost:1/x"));
+        for bad in [
+            "",
+            "/etc/passwd",
+            "file:///etc/passwd",
+            "https://127.0.0.1/x",
+            "http://example.com/a",
+            "http://127.0.0.1.evil.com/a",
+            "ftp://127.0.0.1:1/",
+        ] {
+            assert!(!is_local_stream(bad), "{bad}");
+        }
+    }
 }

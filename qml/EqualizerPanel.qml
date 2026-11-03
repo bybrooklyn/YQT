@@ -169,6 +169,7 @@ ColumnLayout {
             signal released()
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 3 // equal columns whatever the label says
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.Label {
@@ -207,7 +208,6 @@ ColumnLayout {
             dbValue: Equalizer.preampDb
             onMoved: db => Equalizer.setPreampDb(db)
             onReleased: Equalizer.persist()
-            Layout.preferredWidth: Kirigami.Units.gridUnit * 3
             Layout.fillWidth: false
         }
         Kirigami.Separator { Layout.fillHeight: true }

@@ -15,6 +15,8 @@ pub mod engine;
 mod engine_tests;
 pub mod eq;
 pub mod limiter;
+#[cfg(test)]
+mod live_tests;
 pub mod opus;
 pub mod output;
 pub mod presets;

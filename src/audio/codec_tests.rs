@@ -136,6 +136,23 @@ fn seek_works_for_aac_too() {
     assert!((a - AMP).abs() < 0.01 && snr > 25.0, "amp {a} snr {snr}");
 }
 
+/// Dev-only: CPU decode speed in multiples of real time (use `--release`; a debug build is ~10x slower).
+/// `cargo test --release -- --ignored --nocapture dev_decode_speed`
+#[test]
+#[ignore]
+fn dev_decode_speed() {
+    for name in ["chirp_opus.webm", "sine440_opus.webm", "sine440_aac.m4a"] {
+        let bytes = std::fs::read(fixture(name)).unwrap();
+        let (mut audio_secs, t0) = (0.0, std::time::Instant::now());
+        for _ in 0..40 {
+            let (info, pcm) = decode_all(Box::new(MemorySource::new(bytes.clone()))).unwrap();
+            audio_secs += (pcm.len() / info.channels) as f64 / f64::from(info.sample_rate);
+        }
+        let el = t0.elapsed().as_secs_f64();
+        println!("{name}: {audio_secs:.0} s of audio in {el:.2} s = {:.0}x real time", audio_secs / el);
+    }
+}
+
 /// Dev-only: compare with libopus output produced by the dev ffmpeg beforehand (never shipped, never run here by CI).
 /// Generate the references with
 /// `ffmpeg -i tests/fixtures/audio/sine440_opus.webm -f f32le -ac 2 -ar 48000 $YTM_FFREF/sine440_opus.webm.f32`

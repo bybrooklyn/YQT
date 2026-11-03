@@ -249,6 +249,31 @@ fn seeking_after_the_track_ended_replays_it_like_repeat_one() {
     assert!(rx.try_iter().all(|ev| !matches!(ev, Event::Loaded(_))));
 }
 
+/// Dev check of the real device path (cpal): the stream opens and its callback pulls audio. Volume is set to 0 and the
+/// engine is only told to play after the volume ramp finished, so nothing audible is ever produced.
+/// `cargo test -- --ignored --nocapture dev_real_device`
+#[test]
+#[ignore]
+fn dev_real_device_opens_and_consumes_at_volume_zero() {
+    println!("output devices: {:?}", super::output::output_devices());
+    let (e, rx) =
+        Engine::start(&Backend::Device { name: String::new() }, Arc::new(Settings::new(0, true, false))).expect("open the default device");
+    e.set_volume(0.0);
+    println!("device rate: {} Hz", e.rate());
+    let base = serve(Mode::Normal);
+    e.load(&format!("{base}/ok/chirp_opus.webm"), 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(_))).unwrap();
+    std::thread::sleep(Duration::from_millis(200)); // volume ramp to 0 completes while paused
+    e.play();
+    std::thread::sleep(Duration::from_millis(1000));
+    let p = e.position_ms();
+    println!(
+        "position after ~1 s on the real device: {p:.0} ms, underrun frames: {}",
+        e.underruns.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    assert!(p > 500.0, "the device callback is not consuming: {p}");
+}
+
 #[test]
 fn shutting_down_while_loading_does_not_hang() {
     let base = serve(Mode::Normal);

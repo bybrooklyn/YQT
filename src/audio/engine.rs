@@ -224,7 +224,10 @@ impl Core {
     fn produce(&mut self) -> usize {
         let xf_frames = if self.next.is_some() { self.crossfade_frames() } else { 0 };
         let Some(cur) = self.cur.as_mut() else { return 0 };
-        cur.stream.fill(CHUNK + xf_frames);
+        // The fade needs the whole tail decoded in advance; do that only when the end is near (always if the length is unknown).
+        let fade_ms = xf_frames as f64 * 1000.0 / f64::from(self.ring.rate());
+        let far_from_end = cur.stream.duration_ms.is_some_and(|d| (d as f64 - cur.stream.position_ms()) > fade_ms + 8_000.0);
+        cur.stream.fill(CHUNK + if far_from_end { 0 } else { xf_frames });
 
         // start a crossfade once the outgoing track's tail is no longer than the fade
         if self.fade.is_none() && xf_frames > 0 && cur.stream.at_end() && cur.stream.buffered() <= xf_frames && cur.stream.buffered() > 0 {
