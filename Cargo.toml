@@ -9,10 +9,11 @@ description = "A tiny native YouTube Music client (Rust, Qt 6, Kirigami)"
 cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["qt_full"] }
-rustypipe = { version = "0.11", features = ["userdata"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+rustypipe = { version = "0.11", default-features = false, features = ["userdata", "rustls-tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
 serde_json = "1"
-reqwest = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "json", "gzip", "brotli"] }
+plist = "1"
 rand = "0.9"
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 sha1 = "0.11.0"
@@ -31,7 +32,11 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 # Windows-only: DPAPI to unwrap the browser cookie key
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory"] }
+windows-sys = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory", "Win32_System_Registry"] }
+
+# macOS-only: Keychain lookups in-process
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [build-dependencies]
 cxx-qt-build = { version = "0.10", features = ["link_qt_object_files"] }

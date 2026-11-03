@@ -14,6 +14,7 @@
 //! Only the three key lookups touch the OS; everything else is plain functions covered by tests.
 use super::detect::{mtime, Dirs, Os};
 use super::{finish_header, with_private_copy};
+use crate::platform::{all_passwords, SecretStore};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
@@ -281,80 +282,60 @@ pub fn cookies_from_db(copy: &Path, keys: &mut dyn KeySource) -> Result<String, 
 
 pub fn key_source(def: &Def, root: &Path) -> Box<dyn KeySource> {
     match Os::current() {
-        Os::Linux => Box::new(LinuxKeys { def_product: def.product, app: def.app, keyring: None }),
-        Os::Mac => Box::new(MacKeys { product: def.product, cached: None }),
+        Os::Linux => Box::new(StoreKeys::new(
+            crate::platform::native_secret_stores(),
+            format!("{} Safe Storage", def.product),
+            def.app.to_owned(),
+            1,
+            true,
+        )),
+        Os::Mac => Box::new(StoreKeys::new(
+            crate::platform::native_secret_stores(),
+            format!("{} Safe Storage", def.product),
+            def.product.to_owned(),
+            1003,
+            false,
+        )),
         Os::Windows => Box::new(WindowsKeys { root: root.to_path_buf(), cached: None }),
     }
 }
 
-/// Run a command and capture stdout, killing it after `secs` (a wallet prompt may wait for the user).
-fn run_capture(mut cmd: std::process::Command, secs: u64) -> Option<String> {
-    use std::io::Read;
-    let mut child = cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().ok()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-    loop {
-        match child.try_wait().ok()? {
-            Some(status) => {
-                let mut out = String::new();
-                child.stdout.take()?.read_to_string(&mut out).ok()?;
-                return status.success().then(|| out.trim_end_matches(['\r', '\n']).to_owned()).filter(|s| !s.is_empty());
-            }
-            None if std::time::Instant::now() > deadline => {
-                let _ = child.kill();
-                return None;
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(100)),
-        }
-    }
-}
-
-struct LinuxKeys {
-    def_product: &'static str,
-    app: &'static str,
-    keyring: Option<Vec<Key>>,
-}
-
-impl KeySource for LinuxKeys {
-    fn keys(&mut self, prefix: &[u8]) -> Vec<Key> {
-        let peanuts = Key::Cbc(cbc_key("peanuts", 1));
-        if prefix == b"v10" {
-            return vec![peanuts];
-        }
-        let (product, app) = (self.def_product, self.app);
-        self.keyring
-            .get_or_insert_with(|| {
-                // Reading the wallet may pop up the usual "allow access" prompt – that is the user's call.
-                let mut out = Vec::new();
-                let mut cmd = std::process::Command::new("kwallet-query");
-                cmd.args(["-r", &format!("{product} Safe Storage"), "-f", &format!("{product} Keys"), "kdewallet"]);
-                out.extend(run_capture(cmd, 60));
-                let mut cmd = std::process::Command::new("secret-tool");
-                cmd.args(["lookup", "application", app]);
-                out.extend(run_capture(cmd, 60));
-                let mut keys: Vec<Key> = out.iter().map(|p| Key::Cbc(cbc_key(p, 1))).collect();
-                keys.push(peanuts); // "basic" password store
-                keys
-            })
-            .clone()
-    }
-}
-
-struct MacKeys {
-    product: &'static str,
+/// Keys derived from a "Safe Storage" password held by the OS secret stores (KWallet / Secret
+/// Service / Keychain). Reading may pop up the usual "allow access" prompt – that is the user's call.
+pub struct StoreKeys {
+    stores: Vec<Box<dyn SecretStore>>,
+    service: String,
+    account_or_app: String,
+    iterations: u32,
+    /// Linux "basic" password store: v10 blobs use the fixed password "peanuts".
+    peanuts: bool,
     cached: Option<Vec<Key>>,
 }
 
-impl KeySource for MacKeys {
-    fn keys(&mut self, _prefix: &[u8]) -> Vec<Key> {
-        let product = self.product;
-        self.cached
+impl StoreKeys {
+    pub fn new(stores: Vec<Box<dyn SecretStore>>, service: String, account_or_app: String, iterations: u32, peanuts: bool) -> Self {
+        StoreKeys { stores, service, account_or_app, iterations, peanuts, cached: None }
+    }
+}
+
+impl KeySource for StoreKeys {
+    fn keys(&mut self, prefix: &[u8]) -> Vec<Key> {
+        let peanuts = Key::Cbc(cbc_key("peanuts", 1));
+        if self.peanuts && prefix == b"v10" {
+            return vec![peanuts];
+        }
+        let (stores, service, acct, iters) = (&self.stores, &self.service, &self.account_or_app, self.iterations);
+        let mut keys = self
+            .cached
             .get_or_insert_with(|| {
-                // macOS asks the user to allow access to the Keychain item.
-                let mut cmd = std::process::Command::new("security");
-                cmd.args(["find-generic-password", "-w", "-s", &format!("{product} Safe Storage"), "-a", product]);
-                run_capture(cmd, 60).map(|pw| vec![Key::Cbc(cbc_key(&pw, 1003))]).unwrap_or_default()
+                // Errors are deliberately dropped: a missing wallet just means that key source is unavailable.
+                all_passwords(stores, service, acct).unwrap_or_default().iter().map(|p| Key::Cbc(cbc_key(p, iters))).collect()
             })
-            .clone()
+            .clone();
+        if self.peanuts {
+            keys.push(peanuts);
+        }
+        keys
     }
 }
 
@@ -388,30 +369,7 @@ pub fn local_state_key_blob(json: &str) -> Option<Vec<u8>> {
     raw.strip_prefix(b"DPAPI").map(<[u8]>::to_vec)
 }
 
-/// Windows Data Protection API: decrypt a blob that only this user's session can.
-#[cfg(windows)]
-fn dpapi_unprotect(data: &[u8]) -> Option<Vec<u8>> {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
-    let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
-    let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
-    // SAFETY: `input` points at `data` for the duration of the call; on success `out` owns a
-    // LocalAlloc'd buffer of `cbData` bytes, which is copied and then released with LocalFree.
-    unsafe {
-        let ok = CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), 0, &mut out);
-        if ok == 0 || out.pbData.is_null() {
-            return None;
-        }
-        let bytes = std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec();
-        LocalFree(out.pbData as _);
-        Some(bytes)
-    }
-}
-
-#[cfg(not(windows))]
-fn dpapi_unprotect(_data: &[u8]) -> Option<Vec<u8>> {
-    None
-}
+use crate::platform::dpapi_unprotect;
 
 #[cfg(test)]
 mod tests {
@@ -594,6 +552,39 @@ mod tests {
         let e = cookies_from_db(&db, &mut Fixed(vec![])).unwrap_err();
         assert!(e.contains("keyring"), "{e}");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    struct FakeStore(Result<Option<&'static str>, crate::platform::PlatformError>);
+    impl SecretStore for FakeStore {
+        fn password(&self, service: &str, acct: &str) -> Result<Option<String>, crate::platform::PlatformError> {
+            assert_eq!(service, "Chrome Safe Storage");
+            assert_eq!(acct, "chrome");
+            self.0.clone().map(|o| o.map(str::to_owned))
+        }
+    }
+
+    fn store_keys(stores: Vec<Box<dyn SecretStore>>, iters: u32, peanuts: bool) -> StoreKeys {
+        StoreKeys::new(stores, "Chrome Safe Storage".into(), "chrome".into(), iters, peanuts)
+    }
+
+    #[test]
+    fn fake_secret_store_yields_working_keys() {
+        let key = cbc_key("wallet-pw", 1);
+        let blob = enc_cbc(b"v11", &key, &prefixed("cookie-val"));
+        let stores: Vec<Box<dyn SecretStore>> =
+            vec![Box::new(FakeStore(Err(crate::platform::PlatformError::TimedOut))), Box::new(FakeStore(Ok(Some("wallet-pw"))))];
+        let mut ks = store_keys(stores, 1, true);
+        assert_eq!(decrypt_cookie(&blob, &mut ks, true), Decrypted::Text("cookie-val".into()));
+        // v10 on Linux never asks a wallet: only the fixed "peanuts" key
+        assert_eq!(ks.keys(b"v10"), vec![Key::Cbc(cbc_key("peanuts", 1))]);
+    }
+
+    #[test]
+    fn macos_style_store_uses_1003_iterations_and_no_peanuts() {
+        let mut ks = store_keys(vec![Box::new(FakeStore(Ok(Some("kc-pw"))))], 1003, false);
+        assert_eq!(ks.keys(b"v10"), vec![Key::Cbc(cbc_key("kc-pw", 1003))]);
+        let mut none = store_keys(vec![Box::new(FakeStore(Ok(None)))], 1003, false);
+        assert!(none.keys(b"v10").is_empty());
     }
 
     #[test]

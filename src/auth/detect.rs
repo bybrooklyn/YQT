@@ -65,37 +65,10 @@ pub fn default_browser_id(token: &str) -> Option<&'static str> {
     TABLE.iter().find(|(needle, _)| t.contains(needle)).map(|(_, id)| *id)
 }
 
-/// `defaults read …launchservices.secure LSHandlers` → bundle id registered for `https`.
-pub fn parse_mac_default(text: &str) -> Option<String> {
-    let scheme = text.find("LSHandlerURLScheme = https;")?;
-    let before = &text[..scheme];
-    // Keys inside one handler dict are alphabetical, so RoleAll sits right before URLScheme.
-    let role = before.rfind("LSHandlerRoleAll = ")? + "LSHandlerRoleAll = ".len();
-    let value = before[role..].split(';').next()?.trim().trim_matches('"');
-    (!value.is_empty() && value != "-").then(|| value.to_owned())
-}
-
-/// `reg query …\https\UserChoice /v ProgId` → the ProgId (e.g. `ChromeHTML`).
-pub fn parse_reg_progid(text: &str) -> Option<String> {
-    text.lines().find(|l| l.contains("ProgId")).and_then(|l| l.split_whitespace().last()).map(str::to_owned)
-}
-
-fn run(cmd: &str, args: &[&str]) -> String {
-    std::process::Command::new(cmd).args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-}
-
-/// The OS's raw answer for "default web browser" (empty if unknown).
-fn default_token(os: Os) -> String {
-    match os {
-        Os::Linux => run("xdg-settings", &["get", "default-web-browser"]).trim().to_owned(),
-        Os::Mac => parse_mac_default(&run("defaults", &["read", "com.apple.LaunchServices/com.apple.launchservices.secure", "LSHandlers"]))
-            .unwrap_or_default(),
-        Os::Windows => parse_reg_progid(&run(
-            "reg",
-            &["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "/v", "ProgId"],
-        ))
-        .unwrap_or_default(),
-    }
+/// The OS's raw answer for "default web browser" (empty if unknown), read in-process.
+fn default_token(_os: Os) -> String {
+    use crate::platform::{DefaultBrowser, NativeDefaultBrowser};
+    NativeDefaultBrowser.token().unwrap_or_default()
 }
 
 const WINDOWS_CHROMIUM_NOTE: &str =
@@ -159,36 +132,6 @@ mod tests {
         assert_eq!(default_browser_id("org.mozilla.firefox"), Some("firefox"));
         assert_eq!(default_browser_id("something-else"), None);
         assert_eq!(default_browser_id(""), None);
-    }
-
-    #[test]
-    fn parses_macos_launchservices() {
-        let sample = r#"(
-        {
-        LSHandlerContentType = "public.url";
-        LSHandlerPreferredVersions =         {
-            LSHandlerRoleAll = "-";
-        };
-        LSHandlerRoleAll = "com.google.chrome";
-    },
-        {
-        LSHandlerPreferredVersions =         {
-            LSHandlerRoleAll = "-";
-        };
-        LSHandlerRoleAll = "org.mozilla.firefox";
-        LSHandlerURLScheme = https;
-    }
-)"#;
-        assert_eq!(parse_mac_default(sample).as_deref(), Some("org.mozilla.firefox"));
-        assert_eq!(parse_mac_default("nothing relevant"), None);
-        assert_eq!(parse_mac_default("LSHandlerRoleAll = \"-\";\nLSHandlerURLScheme = https;"), None);
-    }
-
-    #[test]
-    fn parses_windows_progid() {
-        let out = "\r\nHKEY_CURRENT_USER\\Software\\...\\UserChoice\r\n    ProgId    REG_SZ    BraveHTML\r\n\r\n";
-        assert_eq!(parse_reg_progid(out).as_deref(), Some("BraveHTML"));
-        assert_eq!(parse_reg_progid("ERROR: The system was unable to find the specified registry key"), None);
     }
 
     /// Build a fake Linux home with two browsers and check detection + ordering.

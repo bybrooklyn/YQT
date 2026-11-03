@@ -18,8 +18,10 @@ mod mpris;
 #[path = "mpris_stub.rs"]
 mod mpris_stub_check;
 mod pagedata;
+mod platform;
 mod player;
 mod proxy;
+mod reporting;
 mod session;
 mod state;
 mod vision;
