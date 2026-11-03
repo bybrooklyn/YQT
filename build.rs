@@ -15,6 +15,15 @@ fn main() {
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
+        "qml/Card.qml",
+        "qml/ArtistChip.qml",
+        "qml/ExpandableText.qml",
+        "qml/StatChips.qml",
+        "qml/Shelf.qml",
+        "qml/TrackRow.qml",
+        "qml/Hero.qml",
+        "qml/RichPage.qml",
+        "qml/NavDrawer.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
@@ -28,6 +37,7 @@ fn main() {
         "src/queuemodel.rs",
         "src/page.rs",
         "src/errors.rs",
+        "src/nav.rs",
     ])
     .build();
 }
