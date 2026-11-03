@@ -21,9 +21,28 @@ const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/201001
 
 /// The headers of a signed-in YouTube Music web request: Cookie + SAPISIDHASH + client identity.
 /// Fails with `AUTH_MSG` when signed out. The values are secrets: never log them.
+/// The WEB_REMIX client version to claim. YouTube rejects requests from long-outdated clients, and RustyPipe keeps
+/// a fresh one in its cache (`clients.desktop_music.data.version`), so prefer that over the (slowly rotting) config default.
+pub fn client_version() -> String {
+    std::fs::read_to_string(crate::state::data_dir().join("rustypipe_cache.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|v| parse_client_version(&v))
+        .unwrap_or_else(|| crate::config::get().youtube.web_remix_client_version.clone())
+}
+
+/// `clients.desktop_music.data.version` of RustyPipe's cache, if it looks like a client version (`1.20261031.09.00`).
+pub fn parse_client_version(cache: &Value) -> Option<String> {
+    let v = cache["clients"]["desktop_music"]["data"]["version"].as_str()?;
+    let ok = !v.is_empty() && v.len() <= 32 && v.chars().all(|c| c.is_ascii_digit() || c == '.') && v.matches('.').count() >= 2;
+    ok.then(|| v.to_owned())
+}
+
 pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
     let yt = &crate::config::get().youtube;
-    let (origin, version) = (yt.music_origin.as_str(), yt.web_remix_client_version.as_str());
+    let origin = yt.music_origin.as_str();
+    let version_owned = client_version();
+    let version = version_owned.as_str();
     let cookie = stored_cookie().ok_or(AUTH_MSG)?;
     let sapisid = cookie_value(&cookie, "SAPISID").or_else(|| cookie_value(&cookie, "__Secure-3PAPISID")).ok_or(AUTH_MSG)?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
@@ -42,7 +61,7 @@ pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
 
 fn web_remix_context() -> Value {
     let yt = &crate::config::get().youtube;
-    json!({"client": {"clientName": "WEB_REMIX", "clientVersion": yt.web_remix_client_version, "hl": yt.language}})
+    json!({"client": {"clientName": "WEB_REMIX", "clientVersion": client_version(), "hl": yt.language}})
 }
 
 async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
@@ -57,8 +76,20 @@ async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
     match resp.status().as_u16() {
         200 => resp.json().await.map_err(|e| e.to_string()),
         401 | 403 => Err(AUTH_MSG.into()),
-        s => Err(format!("YouTube returned HTTP {s}")),
+        s => {
+            // YouTube explains most rejections in `error.message`; surface it (bounded, no request data echoed).
+            let text = resp.text().await.unwrap_or_default();
+            Err(format!("YouTube returned HTTP {s}{}", error_message(&text).map(|m| format!(": {m}")).unwrap_or_default()))
+        }
     }
+}
+
+/// `error.message` / `error.status` from a YouTube error body, cut to a sane length.
+pub fn error_message(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body.get(..body.len().min(64 * 1024))?).ok()?;
+    let msg = v["error"]["message"].as_str().or_else(|| v["error"]["status"].as_str())?;
+    let msg: String = msg.chars().filter(|c| !c.is_control()).take(160).collect();
+    (!msg.is_empty()).then_some(msg)
 }
 
 /// `playbackTracking.videostatsPlaybackUrl.baseUrl` of a `/player` response.
@@ -115,6 +146,34 @@ pub async fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_version_is_read_from_rustypipes_cache_and_validated() {
+        let cache = json!({"clients": {"desktop_music": {"last_update": "x", "data": {"version": "1.20261031.09.00"}}}});
+        assert_eq!(parse_client_version(&cache).as_deref(), Some("1.20261031.09.00"));
+        // missing, empty, junk or absurd values fall back to the config default
+        assert_eq!(parse_client_version(&json!({})), None);
+        assert_eq!(parse_client_version(&json!({"clients": {"desktop_music": {"data": {"version": ""}}}})), None);
+        assert_eq!(parse_client_version(&json!({"clients": {"desktop_music": {"data": {"version": "1.2; DROP"}}}})), None);
+        assert_eq!(parse_client_version(&json!({"clients": {"desktop_music": {"data": {"version": "12"}}}})), None);
+        assert_eq!(
+            parse_client_version(&json!({"clients": {"desktop_music": {"data": {"version": "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15"}}}})),
+            None
+        );
+    }
+
+    #[test]
+    fn youtube_error_bodies_are_summarised_safely() {
+        let body = r#"{"error":{"code":400,"message":"Precondition check failed.","status":"FAILED_PRECONDITION"}}"#;
+        assert_eq!(error_message(body).as_deref(), Some("Precondition check failed."));
+        assert_eq!(error_message(r#"{"error":{"status":"INVALID_ARGUMENT"}}"#).as_deref(), Some("INVALID_ARGUMENT"));
+        assert_eq!(error_message("<html>not json</html>"), None);
+        assert_eq!(error_message(r#"{"error":{"message":""}}"#), None);
+        // control characters are dropped and the length is bounded
+        let long = format!(r#"{{"error":{{"message":"a\nb{}"}}}}"#, "x".repeat(500));
+        let m = error_message(&long).unwrap();
+        assert!(m.chars().count() <= 160 && !m.contains('\n'));
+    }
 
     #[test]
     fn hash_is_sha1_hex() {

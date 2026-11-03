@@ -76,6 +76,9 @@ pub mod qobject {
         /// One finished row of a progressively loaded page; `slot` fixes its position on the page.
         #[qsignal]
         fn partial(self: Pin<&mut Backend>, id: i32, slot: i32, json: QString);
+        /// A like/unlike YouTube refused: the heart has already been put back, show `message` to the user.
+        #[qsignal]
+        fn like_failed(self: Pin<&mut Backend>, video_id: QString, message: QString);
     }
 
     impl cxx_qt::Threading for Backend {}
@@ -623,13 +626,24 @@ impl qobject::Backend {
     fn is_liked(&self, video_id: &QString) -> bool {
         liked_set(|s| s.contains(&video_id.to_string()))
     }
-    fn set_liked(self: Pin<&mut Self>, video_id: &QString, liked: bool) -> i32 {
+    fn set_liked(mut self: Pin<&mut Self>, video_id: &QString, liked: bool) -> i32 {
         let vid = video_id.to_string();
+        let th = self.qt_thread();
+        // Optimistic: the heart flips immediately; if YouTube refuses, it flips back and `like_failed` says why.
+        liked_set(|s| if liked { s.insert(vid.clone()) } else { s.remove(&vid) });
+        let rev = *self.liked_rev() + 1;
+        self.as_mut().set_liked_rev(rev);
         spawn(self, async move {
-            ytapi::rate(&vid, liked).await?;
-            liked_set(|s| if liked { s.insert(vid.clone()) } else { s.remove(&vid) });
-            LIKED_DIRTY.store(true, Ordering::Relaxed);
-            Ok(json!({"liked": liked}))
+            match ytapi::rate(&vid, liked).await {
+                Ok(()) => Ok(json!({"liked": liked})),
+                Err(message) => {
+                    liked_set(|s| if liked { s.remove(&vid) } else { s.insert(vid.clone()) });
+                    LIKED_DIRTY.store(true, Ordering::Relaxed); // makes `spawn` bump the revision, so the heart is redrawn
+                    let (v, m) = (QString::from(&vid), QString::from(&message));
+                    let _ = th.queue(move |mut b| b.as_mut().like_failed(v, m));
+                    Err(message)
+                }
+            }
         })
     }
     fn my_playlists(self: Pin<&mut Self>) -> i32 {
