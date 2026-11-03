@@ -5,62 +5,36 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
-// Pick one of your playlists to add a song to. The list is lazy: the first page loads when the dialog opens and the
-// rest as you scroll, so a big library doesn't make the dialog wait.
+// Pick one of your playlists to add a song to. The list is a `PageController` in picker mode (Rust): the first page
+// loads when the dialog opens and the rest as you scroll, so a big library doesn't make the dialog wait.
 Kirigami.Dialog {
     id: dlg
-    property var song: ({})
-    property var playlists: []           // [{id, title, subtitle}]
+    property var song: ({})              // {videoId, title}
     property string message
     property bool failed: false
     property bool busy: false
-    property int listReq: -1
     property int addReq: -1
-    property int moreReq: -1
-    property int pagerId: 0
-    property bool hasMore: false
 
     title: qsTr("Add to playlist")
     standardButtons: Kirigami.Dialog.Close
     preferredWidth: Kirigami.Units.gridUnit * 22
 
-    function parse(json) { try { return JSON.parse(json) } catch (e) { return null } }
-    function entries(items) { return items.map(p => ({id: p.browseId, title: p.title, subtitle: p.subtitle})) }
-    function loadMore() {
-        if (hasMore && pagerId > 0 && moreReq < 0 && !busy) moreReq = Backend.more(pagerId)
-    }
+    PageController { id: ctl }
 
     onOpened: {
-        message = ""; failed = false; playlists = []; busy = true
-        hasMore = false; pagerId = 0; moreReq = -1
-        listReq = Backend.myPlaylists()
+        message = ""; failed = false; busy = false
+        ctl.loadPicker()
     }
 
     property QtObject backendWatcher: Connections {
         target: Backend
         function onDone(id, err, json) {
-            if (id === dlg.listReq) {
-                dlg.busy = false
-                if (err) { dlg.failed = true; dlg.message = err.split("\n\n")[0]; return }
-                const res = dlg.parse(json)
-                if (!res) { dlg.failed = true; dlg.message = qsTr("Got an unreadable answer from the app."); return }
-                dlg.playlists = dlg.entries(res.items || [])
-                dlg.pagerId = res.pager || 0
-                dlg.hasMore = !!res.more
-            } else if (id === dlg.moreReq) {
-                dlg.moreReq = -1
-                if (err) { dlg.hasMore = false; return }
-                const res = dlg.parse(json)
-                if (!res) { dlg.hasMore = false; return }
-                dlg.playlists = dlg.playlists.concat(dlg.entries(res.items || []))
-                dlg.hasMore = !!res.more
-            } else if (id === dlg.addReq) {
-                dlg.busy = false
-                dlg.failed = !!err
-                if (err) { dlg.message = err.split("\n\n")[0]; return }
-                dlg.close()
-                applicationWindow().showPassiveNotification(qsTr("Added “%1”").arg(dlg.song.title))
-            }
+            if (id !== dlg.addReq) return
+            dlg.busy = false
+            dlg.failed = !!err
+            if (err) { dlg.message = err.split("\n\n")[0]; return }
+            dlg.close()
+            applicationWindow().showPassiveNotification(qsTr("Added “%1”").arg(dlg.song.title))
         }
     }
 
@@ -72,28 +46,67 @@ Kirigami.Dialog {
             type: dlg.failed ? Kirigami.MessageType.Error : Kirigami.MessageType.Information
             text: dlg.message
         }
-        QQC2.BusyIndicator { Layout.alignment: Qt.AlignHCenter; running: dlg.busy; visible: running }
+        QQC2.BusyIndicator { Layout.alignment: Qt.AlignHCenter; running: dlg.busy || ctl.state === "loading"; visible: running }
+        ErrorView {
+            Layout.fillWidth: true
+            visible: ctl.state === "error" || ctl.state === "offline"
+            kind: ctl.errorKind
+            headline: ctl.errorHeadline
+            hint: ctl.errorHint
+            detail: ctl.errorDetail
+            errorId: ctl.errorId
+            diagnostics: ctl.errorDiagnostics
+            retryMode: ctl.errorRetry
+            retryMs: ctl.errorRetryMs
+            onRetryRequested: ctl.retry()
+            onAutoRetryRequested: ctl.autoRetry()
+            onOpenSettings: { dlg.close(); applicationWindow().go("settings") }
+            onShowDownloads: { dlg.close(); applicationWindow().go("downloads") }
+        }
         ListView {
             id: list
+            visible: ctl.state === "ready"
             Layout.fillWidth: true
             Layout.preferredHeight: Kirigami.Units.gridUnit * 14
             clip: true
-            model: dlg.playlists
-            // load the next page when scrolled near the end
-            onContentYChanged: if (contentHeight - contentY - height < height) dlg.loadMore()
-            onContentHeightChanged: if (contentHeight - contentY - height < height) dlg.loadMore()
+            model: ctl
+            // the controller decides when the next page is due
+            function reportScroll() {
+                if (count <= 0 || height <= 0) return
+                let i = indexAt(width / 2, contentY + height - 1)
+                if (i < 0) i = atYEnd ? -1 : -2          // -1: past the last row, -2: not laid out yet
+                ctl.nearEnd(i, count)
+            }
+            Timer { id: scrollTimer; interval: 40; onTriggered: list.reportScroll() }
+            onContentYChanged: if (!scrollTimer.running) scrollTimer.start()
+            onContentHeightChanged: if (!scrollTimer.running) scrollTimer.start()
+            onCountChanged: if (!scrollTimer.running) scrollTimer.start()
             delegate: QQC2.ItemDelegate {
-                required property var modelData
+                id: item
+                required property string title
+                required property string subtitle
+                required property string browseId
+                required property string thumbnail
+                required property string placeholder
                 width: ListView.view.width
-                text: modelData.title
-                icon.name: "view-media-playlist"
                 enabled: !dlg.busy
-                contentItem: ColumnLayout {
-                    spacing: 0
-                    QQC2.Label { text: modelData.title; elide: Text.ElideRight; Layout.fillWidth: true }
-                    QQC2.Label { text: modelData.subtitle; font: Kirigami.Theme.smallFont; opacity: 0.7; visible: text.length > 0; elide: Text.ElideRight; Layout.fillWidth: true }
+                contentItem: RowLayout {
+                    spacing: Kirigami.Units.largeSpacing
+                    CoverImage {
+                        source: item.thumbnail
+                        kind: item.placeholder
+                        decode: 128
+                        Layout.preferredWidth: Kirigami.Units.gridUnit * 2
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 2
+                    }
+                    ColumnLayout {
+                        spacing: 0
+                        Layout.fillWidth: true
+                        QQC2.Label { text: item.title; elide: Text.ElideRight; Layout.fillWidth: true }
+                        QQC2.Label { text: item.subtitle; font: Kirigami.Theme.smallFont; opacity: 0.7; visible: text.length > 0; elide: Text.ElideRight; Layout.fillWidth: true }
+                    }
                 }
-                onClicked: { dlg.busy = true; dlg.message = ""; dlg.addReq = Backend.addToPlaylist(modelData.id, dlg.song.videoId) }
+                onClicked: { dlg.busy = true; dlg.message = ""; dlg.addReq = Backend.addToPlaylist(item.browseId, dlg.song.videoId) }
             }
         }
     }

@@ -9,11 +9,13 @@ mod errors;
 mod items;
 mod logging;
 mod lyrics;
+mod models;
 #[cfg(target_os = "linux")]
 mod mpris;
 #[cfg(not(target_os = "linux"))]
 #[path = "mpris_stub.rs"]
 mod mpris;
+mod page;
 // Keep the stub compiling (and in sync) on Linux too.
 #[cfg(all(test, target_os = "linux"))]
 #[path = "mpris_stub.rs"]
@@ -23,6 +25,7 @@ mod pages;
 mod platform;
 mod player;
 mod proxy;
+mod queuemodel;
 mod reporting;
 mod security;
 mod session;
@@ -58,7 +61,21 @@ fn main() {
     }
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
-        engine.load(&QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml"));
+        #[cfg(feature = "harness")]
+        let entry = {
+            // canned pages and no stream lookups: nothing leaves the machine
+            if std::env::var_os("YTM_DEMO").is_some() || std::env::args().any(|a| a == "--qml") {
+                page::install_demo_source();
+                player::disable_streams();
+            }
+            match std::env::args().skip_while(|a| a != "--qml").nth(1) {
+                Some(path) => QUrl::from(&format!("file://{path}")),
+                None => QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml"),
+            }
+        };
+        #[cfg(not(feature = "harness"))]
+        let entry = QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml");
+        engine.load(&entry);
     }
     if let Some(app) = app.as_mut() {
         app.exec();

@@ -30,6 +30,11 @@ dirs = "6"
 aes-gcm = "0.10"
 base64 = "0.22"
 
+[features]
+# Developer-only: `ytm --qml <file>` loads a QML file instead of the app and swaps the page loaders for canned data,
+# so views can be rendered and driven offline (see qml/harness/). Never enabled in normal builds.
+harness = []
+
 # Linux-only: MPRIS over D-Bus
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }

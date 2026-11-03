@@ -14,7 +14,7 @@ use rustypipe::model::{AlbumItem, ArtistItem, MusicPlaylistItem, TrackItem};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 pub(crate) type Res = Result<Value, String>;
@@ -89,6 +89,22 @@ pub struct BackendRust {
 }
 
 static LOGGED: AtomicBool = AtomicBool::new(false);
+/// Counts sign-in / sign-out changes; cached pages from an earlier epoch belong to another account.
+static LOGIN_EPOCH: AtomicU32 = AtomicU32::new(0);
+
+fn set_logged(v: bool) {
+    if LOGGED.swap(v, Ordering::Relaxed) != v {
+        LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn is_logged_in() -> bool {
+    LOGGED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn login_epoch() -> u32 {
+    LOGIN_EPOCH.load(Ordering::Relaxed)
+}
 static LIKED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static LIKED_DIRTY: AtomicBool = AtomicBool::new(false);
 
@@ -109,7 +125,7 @@ fn finish(mut b: Pin<&mut qobject::Backend>, id: i32, r: Res) {
         Ok(v) => b.as_mut().done(id, QString::default(), QString::from(&v.to_string())),
         Err(e) => {
             if e == AUTH_MSG {
-                LOGGED.store(false, Ordering::Relaxed);
+                set_logged(false);
                 b.as_mut().set_logged_in(false);
             }
             b.as_mut().done(id, QString::from(&e), QString::default())
@@ -286,7 +302,7 @@ pub(crate) async fn search(q: String, filter: String) -> Res {
     })
 }
 
-async fn suggest(q: String) -> Res {
+pub(crate) async fn suggest(q: String) -> Res {
     let s = st().rp.query().music_search_suggestion(&q).await.map_err(err)?;
     Ok(json!(s.terms.into_iter().take(crate::config::get().library.suggestions).collect::<Vec<_>>()))
 }
@@ -451,7 +467,9 @@ pub(crate) async fn browse(target: String) -> Res {
             Ok(page(&a.name, &sub, &cover, v))
         }
         "playlist" => {
-            if id == "LIKED" {
+            // every spelling of "liked music" (our synthetic row, YouTube's `LM` / `VLLM`) takes the path that works
+            let id = crate::models::items::canonical_playlist_id(id);
+            if id == crate::models::items::LIKED_ID {
                 // First page only; the rest loads on scroll. Whatever we see here is liked, so remember it for the hearts.
                 let tracks = liked_tracks(&authed()).await.map_err(err)?;
                 liked_set(|s| s.extend(tracks.items.iter().map(|t| t.id.clone())));
@@ -579,7 +597,7 @@ impl qobject::Backend {
     }
     fn logout(self: Pin<&mut Self>) {
         let th = self.qt_thread();
-        LOGGED.store(false, Ordering::Relaxed);
+        set_logged(false);
         liked_set(|s| s.clear());
         st().rt.spawn(async move {
             let _ = st().rp.user_auth_remove_cookie().await;
@@ -596,7 +614,7 @@ impl qobject::Backend {
         // Optimistic: a stored cookie means "signed in" right now, so the Library and Home don't wait on a network
         // round trip. The check below corrects this if YouTube no longer accepts the session.
         if auth::stored_cookie().is_some() {
-            LOGGED.store(true, Ordering::Relaxed);
+            set_logged(true);
             self.as_mut().set_logged_in(true);
         }
         st().rt.spawn(async move {
@@ -605,7 +623,7 @@ impl qobject::Backend {
                 Err(RpError::Auth(_)) => false,
                 Err(_) => auth::stored_cookie().is_some(), // offline: trust the stored cookie
             };
-            LOGGED.store(ok, Ordering::Relaxed);
+            set_logged(ok);
             // Publish the sign-in state FIRST; the liked-songs preload below is slow and must never gate it.
             let th_liked = th.clone();
             let _ = th.queue(move |mut b| b.as_mut().set_logged_in(ok));

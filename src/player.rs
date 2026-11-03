@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 use crate::items::track;
+use crate::models::queue::{pick_other, QueueState};
+use crate::models::Change;
+use crate::queuemodel::{self, QueueEditor};
 use crate::session::Session;
 use crate::state::st;
 use core::pin::Pin;
@@ -24,7 +27,7 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qml_singleton]
-        #[qproperty(QString, queue)] // JSON array of items
+        #[qproperty(i32, queue)] // revision: bumps on every queue edit (the rows themselves are in `QueueModel`)
         #[qproperty(i32, index)]
         #[qproperty(bool, has_track)]
         #[qproperty(QString, title)]
@@ -91,10 +94,11 @@ pub mod qobject {
     }
 
     impl cxx_qt::Threading for Player {}
+    impl cxx_qt::Initialize for Player {}
 }
 
 pub struct PlayerRust {
-    queue: QString,
+    queue: i32,
     index: i32,
     has_track: bool,
     title: QString,
@@ -114,17 +118,16 @@ pub struct PlayerRust {
     shuffle: bool,
     repeat: i32,
     volume: f64,
-    items: Vec<Value>,
+    state: QueueState<Value>,
     generation: u64,
     radio_busy: bool,
-    retried: u64,        // generation that already had one automatic retry
-    history: Vec<usize>, // indices played via shuffle, so "previous" can retrace
+    retried: u64, // generation that already had one automatic retry
 }
 
 impl Default for PlayerRust {
     fn default() -> Self {
         Self {
-            queue: QString::from("[]"),
+            queue: 0,
             index: -1,
             has_track: false,
             title: QString::default(),
@@ -144,11 +147,10 @@ impl Default for PlayerRust {
             shuffle: false,
             repeat: 0,
             volume: 0.8,
-            items: Vec::new(),
+            state: QueueState::default(),
             generation: 0,
             radio_busy: false,
             retried: u64::MAX,
-            history: Vec::new(),
         }
     }
 }
@@ -169,8 +171,21 @@ fn forget(id: &str) {
     CACHE.lock().unwrap().get_or_insert_default().remove(id);
 }
 
+/// Developer harness only: never look streams up (no network, no audio).
+#[cfg(feature = "harness")]
+static NO_STREAMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(feature = "harness")]
+pub fn disable_streams() {
+    NO_STREAMS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Resolve a playable audio stream URL for a video id (cached for 30 min).
 async fn resolve(id: &str) -> Result<String, String> {
+    #[cfg(feature = "harness")]
+    if NO_STREAMS.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Streams are switched off in the harness".to_owned());
+    }
     if let Some((url, at)) = CACHE.lock().unwrap().get_or_insert_default().get(id) {
         if at.elapsed() < Duration::from_secs(crate::config::get().playback.stream_cache_minutes * 60) {
             return Ok(url.clone());
@@ -214,17 +229,37 @@ impl qobject::Player {
         unsafe { self.rust_mut().get_unchecked_mut() }
     }
 
-    fn publish_queue(mut self: Pin<&mut Self>) {
-        self.as_mut().st_mut().history.clear();
-        let json = Value::Array(self.as_mut().st_mut().items.clone()).to_string();
-        self.as_mut().set_queue(QString::from(&json));
+    /// Tell the `QueueModel` (and Main.qml's session saver, via the `queue` revision) about an edit.
+    fn publish(mut self: Pin<&mut Self>, change: Change<Value>) {
+        let items = self.rust().state.items().to_vec();
+        queuemodel::publish(change, move || items);
+        let rev = self.queue.wrapping_add(1);
+        self.as_mut().set_queue(rev);
+    }
+
+    /// Keep the `index` property equal to the queue's playing row.
+    fn sync_index(mut self: Pin<&mut Self>) {
+        let idx = self.rust().state.current().map_or(-1, |c| c as i32);
+        if *self.index() != idx {
+            self.as_mut().set_index(idx);
+        }
+    }
+
+    fn stop_playing(mut self: Pin<&mut Self>) {
+        self.as_mut().st_mut().generation += 1;
+        self.as_mut().st_mut().state.set_current(None);
+        self.as_mut().set_has_track(false);
+        self.as_mut().set_index(-1);
+        self.as_mut().set_source(QString::default());
+        self.as_mut().set_title(QString::default());
     }
 
     fn load(mut self: Pin<&mut Self>, i: usize) {
-        let Some(item) = self.rust().items.get(i).cloned() else { return };
+        let Some(item) = self.rust().state.get(i).cloned() else { return };
         let generation = {
             let r = self.as_mut().st_mut();
             r.generation += 1;
+            r.state.set_current(Some(i));
             r.generation
         };
         let vid = s(&item, "videoId");
@@ -243,7 +278,7 @@ impl qobject::Player {
         self.as_mut().set_autoplay(true);
         self.as_mut().set_loading(true);
 
-        let next_vid = self.rust().items.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::get().playback.prefetch_next);
+        let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::get().playback.prefetch_next);
         let th = self.qt_thread();
         st().rt.spawn(async move {
             let r = resolve(&vid).await;
@@ -268,7 +303,7 @@ impl qobject::Player {
         if self.rust().radio_busy {
             return;
         }
-        let Some(seed) = self.rust().items.last().map(|l| s(l, "videoId")) else { return };
+        let Some(seed) = self.rust().state.items().last().map(|l| s(l, "videoId")) else { return };
         let generation = self.rust().generation;
         self.as_mut().st_mut().radio_busy = true;
         let th = self.qt_thread();
@@ -279,16 +314,16 @@ impl qobject::Player {
             };
             let _ = th.queue(move |mut p| {
                 p.as_mut().st_mut().radio_busy = false;
-                let have: Vec<String> = p.rust().items.iter().map(|i| s(i, "videoId")).collect();
+                let have: Vec<String> = p.rust().state.items().iter().map(|i| s(i, "videoId")).collect();
                 let new: Vec<Value> = items.into_iter().filter(|i| !have.contains(&s(i, "videoId"))).collect();
                 if !new.is_empty() {
-                    p.as_mut().st_mut().items.extend(new);
-                    p.as_mut().publish_queue();
+                    let change = p.as_mut().st_mut().state.extend(new);
+                    p.as_mut().publish(change);
                 }
                 // Only advance if the user hasn't moved on (or emptied the queue) meanwhile.
                 if advance && p.rust().generation == generation {
                     let idx = (*p.index()).max(0) as usize;
-                    if idx + 1 < p.rust().items.len() {
+                    if idx + 1 < p.rust().state.len() {
                         p.as_mut().load(idx + 1);
                     }
                 }
@@ -296,91 +331,121 @@ impl qobject::Player {
         });
     }
 
-    fn play_song(mut self: Pin<&mut Self>, song_json: &QString) {
-        let Some(song) = Self::parse(song_json) else { return };
-        self.as_mut().st_mut().items = vec![song];
-        self.as_mut().publish_queue();
+    // ---- queue operations on typed values (the JSON invokables and the page controller both end up here) ----
+
+    pub(crate) fn play_one(mut self: Pin<&mut Self>, song: Value) {
+        let change = self.as_mut().st_mut().state.replace(vec![song]);
+        self.as_mut().publish(change);
         self.as_mut().load(0);
         self.fetch_radio(false);
     }
 
-    fn play_list(mut self: Pin<&mut Self>, songs_json: &QString, start: i32) {
-        let Some(Value::Array(songs)) = Self::parse(songs_json) else { return };
+    pub(crate) fn play_many(mut self: Pin<&mut Self>, songs: Vec<Value>, start: usize) {
         if songs.is_empty() {
             return;
         }
-        let start = (start.max(0) as usize).min(songs.len() - 1);
-        self.as_mut().st_mut().items = songs;
-        self.as_mut().publish_queue();
+        let start = start.min(songs.len() - 1);
+        let change = self.as_mut().st_mut().state.replace(songs);
+        self.as_mut().publish(change);
         self.load(start);
     }
 
-    fn play_index(self: Pin<&mut Self>, i: i32) {
-        if i >= 0 && (i as usize) < self.rust().items.len() {
-            self.load(i as usize);
-        }
+    pub(crate) fn enqueue_one(self: Pin<&mut Self>, song: Value) {
+        self.enqueue_many(vec![song]);
     }
 
-    fn enqueue(mut self: Pin<&mut Self>, song_json: &QString) {
-        let Some(song) = Self::parse(song_json) else { return };
-        let history = std::mem::take(&mut self.as_mut().st_mut().history);
-        self.as_mut().st_mut().items.push(song);
-        self.as_mut().publish_queue();
-        self.as_mut().st_mut().history = history; // appending keeps old indices valid
+    pub(crate) fn enqueue_many(mut self: Pin<&mut Self>, songs: Vec<Value>) {
+        if songs.is_empty() {
+            return;
+        }
+        let change = self.as_mut().st_mut().state.extend(songs);
+        self.as_mut().publish(change);
         if !*self.has_track() {
-            let last = self.rust().items.len() - 1;
+            let last = self.rust().state.len() - 1;
             self.load(last);
         }
     }
 
-    fn play_next(mut self: Pin<&mut Self>, song_json: &QString) {
-        let Some(song) = Self::parse(song_json) else { return };
-        let at = ((*self.index() + 1).max(0) as usize).min(self.rust().items.len());
-        self.as_mut().st_mut().items.insert(at, song);
-        self.as_mut().publish_queue();
+    pub(crate) fn play_next_one(mut self: Pin<&mut Self>, song: Value) {
+        let change = self.as_mut().st_mut().state.insert_next(song);
+        self.as_mut().publish(change);
+        self.as_mut().sync_index();
         if !*self.has_track() {
             self.load(0);
         }
     }
 
-    fn remove_at(mut self: Pin<&mut Self>, i: i32) {
-        let len = self.rust().items.len() as i32;
-        if i < 0 || i >= len {
+    /// Move an existing queue row to just after the playing one (the "Play next" of a queue row).
+    pub(crate) fn move_to_next(mut self: Pin<&mut Self>, from: usize) {
+        let cur = self.rust().state.current();
+        let to = match cur {
+            Some(c) if from > c => c + 1,
+            Some(c) => c, // from <= c: after the removal the playing row sits at c-1, so "after it" is index c
+            None => 0,
+        };
+        if from == to {
             return;
         }
-        self.as_mut().st_mut().items.remove(i as usize);
-        self.as_mut().publish_queue();
-        let cur = *self.index();
-        if i < cur {
-            self.as_mut().set_index(cur - 1);
-        } else if i == cur {
-            if len == 1 {
-                self.as_mut().st_mut().generation += 1;
-                self.as_mut().set_has_track(false);
-                self.as_mut().set_index(-1);
-                self.as_mut().set_source(QString::default());
-                self.as_mut().set_title(QString::default());
-            } else {
-                self.load(i.min(len - 2) as usize);
-            }
+        if let Some(change) = self.as_mut().st_mut().state.move_item(from, to) {
+            self.as_mut().publish(change);
+            self.sync_index();
+        }
+    }
+
+    pub(crate) fn set_shuffle_on(mut self: Pin<&mut Self>) {
+        self.as_mut().set_shuffle(true);
+    }
+
+    fn play_song(self: Pin<&mut Self>, song_json: &QString) {
+        let Some(song) = Self::parse(song_json) else { return };
+        self.play_one(song);
+    }
+
+    fn play_list(self: Pin<&mut Self>, songs_json: &QString, start: i32) {
+        let Some(Value::Array(songs)) = Self::parse(songs_json) else { return };
+        self.play_many(songs, start.max(0) as usize);
+    }
+
+    fn play_index(self: Pin<&mut Self>, i: i32) {
+        if i >= 0 && (i as usize) < self.rust().state.len() {
+            self.load(i as usize);
+        }
+    }
+
+    fn enqueue(self: Pin<&mut Self>, song_json: &QString) {
+        let Some(song) = Self::parse(song_json) else { return };
+        self.enqueue_one(song);
+    }
+
+    fn play_next(self: Pin<&mut Self>, song_json: &QString) {
+        let Some(song) = Self::parse(song_json) else { return };
+        self.play_next_one(song);
+    }
+
+    fn remove_at(mut self: Pin<&mut Self>, i: i32) {
+        let Ok(i) = usize::try_from(i) else { return };
+        let Some(removal) = self.as_mut().st_mut().state.remove(i) else { return };
+        self.as_mut().publish(removal.change);
+        if !removal.was_current {
+            return self.sync_index();
+        }
+        match removal.replacement {
+            Some(k) => self.load(k),
+            None => self.stop_playing(),
         }
     }
 
     fn next(self: Pin<&mut Self>) {
-        let len = self.rust().items.len();
+        let len = self.rust().state.len();
         if len == 0 {
             return;
         }
         let cur = (*self.index()).max(0) as usize;
         if *self.shuffle() && len > 1 {
-            let mut rng = rand::rng();
-            let mut i = rng.random_range(0..len);
-            while i == cur {
-                i = rng.random_range(0..len);
-            }
+            let pick = pick_other(len, cur, rand::rng().random_range(0..len - 1)).unwrap_or(0);
             let mut this = self;
-            this.as_mut().st_mut().history.push(cur);
-            this.load(i);
+            this.as_mut().st_mut().state.push_history(cur);
+            this.load(pick);
         } else if cur + 1 < len {
             self.load(cur + 1);
         } else if *self.repeat() == 1 {
@@ -395,7 +460,7 @@ impl qobject::Player {
     fn media_failed(mut self: Pin<&mut Self>, message: &QString) {
         let cur = *self.index();
         let generation = self.rust().generation;
-        let Some(item) = (cur >= 0).then(|| self.rust().items.get(cur as usize).cloned()).flatten() else { return };
+        let Some(item) = (cur >= 0).then(|| self.rust().state.get(cur as usize).cloned()).flatten() else { return };
         if self.rust().retried != generation {
             // Stream URLs can expire or get cut off: fetch a fresh one once.
             let autoplay = *self.autoplay();
@@ -414,9 +479,9 @@ impl qobject::Player {
 
     fn clear_queue(mut self: Pin<&mut Self>) {
         let r = self.as_mut().st_mut();
-        r.items.clear();
+        let change = r.state.clear();
         r.generation += 1;
-        self.as_mut().publish_queue();
+        self.as_mut().publish(change);
         self.as_mut().set_has_track(false);
         self.as_mut().set_index(-1);
         self.as_mut().set_source(QString::default());
@@ -426,24 +491,11 @@ impl qobject::Player {
     }
 
     fn move_item(mut self: Pin<&mut Self>, from: i32, to: i32) {
-        let len = self.rust().items.len() as i32;
-        if from < 0 || to < 0 || from >= len || to >= len || from == to {
-            return;
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else { return };
+        if let Some(change) = self.as_mut().st_mut().state.move_item(from, to) {
+            self.as_mut().publish(change);
+            self.sync_index();
         }
-        let item = self.as_mut().st_mut().items.remove(from as usize);
-        self.as_mut().st_mut().items.insert(to as usize, item);
-        self.as_mut().publish_queue();
-        let cur = *self.index();
-        let new_cur = if cur == from {
-            to
-        } else if from < cur && to >= cur {
-            cur - 1
-        } else if from > cur && to <= cur {
-            cur + 1
-        } else {
-            cur
-        };
-        self.set_index(new_cur);
     }
 
     fn test_stream(self: Pin<&mut Self>) {
@@ -502,17 +554,17 @@ impl qobject::Player {
 
     fn save_session(self: Pin<&mut Self>, position: i64) {
         let idx = *self.index();
-        if idx < 0 || self.rust().items.is_empty() {
+        if idx < 0 || self.rust().state.is_empty() {
             Session::clear();
             return;
         }
-        Session { items: self.rust().items.clone(), index: idx as usize, position }.save();
+        Session { items: self.rust().state.items().to_vec(), index: idx as usize, position }.save();
     }
 
     fn restore_session(mut self: Pin<&mut Self>) {
         let Some(session) = Session::load() else { return };
-        self.as_mut().st_mut().items = session.items;
-        self.as_mut().publish_queue();
+        let change = self.as_mut().st_mut().state.replace(session.items);
+        self.as_mut().publish(change);
         self.as_mut().set_resume_pos(session.position);
         self.as_mut().load(session.index);
         self.set_autoplay(false);
@@ -520,14 +572,49 @@ impl qobject::Player {
 
     /// QML restarts the current track itself when it's past 3s.
     fn previous(mut self: Pin<&mut Self>) {
-        if let Some(i) = self.as_mut().st_mut().history.pop() {
-            if i < self.rust().items.len() {
-                return self.load(i);
-            }
+        if let Some(i) = self.as_mut().st_mut().state.pop_history() {
+            return self.load(i);
         }
         let cur = *self.index();
         if cur > 0 {
             self.load((cur - 1) as usize);
         }
+    }
+}
+
+// ---- reaching the Player from other Rust QObjects ----------------------------------------------------------------
+
+static HANDLE: Mutex<Option<cxx_qt::CxxQtThread<qobject::Player>>> = Mutex::new(None);
+
+/// Run `f` on the Qt thread with the `Player` (a no-op until QML has created it). This is how the page controller
+/// starts playback and how the queue model's drag-and-drop edits reach the queue.
+pub fn with_player(f: impl FnOnce(Pin<&mut qobject::Player>) + Send + 'static) {
+    if let Some(th) = HANDLE.lock().unwrap().as_ref() {
+        let _ = th.queue(f);
+    }
+}
+
+impl cxx_qt::Initialize for qobject::Player {
+    fn initialize(self: Pin<&mut Self>) {
+        *HANDLE.lock().unwrap() = Some(self.qt_thread());
+        queuemodel::install_editor(|edit| with_player(move |p| edit(&mut PlayerEditor(p))));
+    }
+}
+
+/// What the `QueueModel` may ask of the queue's owner.
+struct PlayerEditor<'a>(Pin<&'a mut qobject::Player>);
+
+impl QueueEditor for PlayerEditor<'_> {
+    fn move_row(&mut self, from: usize, to: usize) {
+        self.0.as_mut().move_item(from as i32, to as i32);
+    }
+    fn remove_row(&mut self, at: usize) {
+        self.0.as_mut().remove_at(at as i32);
+    }
+    fn play_row(&mut self, at: usize) {
+        self.0.as_mut().play_index(at as i32);
+    }
+    fn play_row_next(&mut self, at: usize) {
+        self.0.as_mut().move_to_next(at);
     }
 }
