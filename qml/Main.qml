@@ -191,6 +191,26 @@ Kirigami.ApplicationWindow {
 
     footer: NowPlayingBar {}
 
+    // ---- mini-player + system tray (W9) ----
+    MiniPlayer { id: mini }
+    TrayController { id: trayController; mini: mini }
+    function toggleMiniPlayer() { mini.toggle() }
+    Shortcut {
+        sequence: AppConfig.keyMiniPlayer
+        enabled: AppConfig.keyMiniPlayer.length > 0
+        onActivated: root.toggleMiniPlayer()
+    }
+    // With `window.close_to_tray` on (and a tray that exists) closing the window only hides it; music keeps playing
+    // and the tray's Quit really quits. Otherwise closing quits as before, taking the mini-player with it.
+    onClosing: close => {
+        if (AppConfig.closeToTray && trayController.available) {
+            close.accepted = false
+            root.hide()
+        } else {
+            mini.visible = false
+        }
+    }
+
     Component.onCompleted: {
         pageStack.columnView.columnResizeMode = Kirigami.ColumnView.SingleColumn
         Player.startMpris()

@@ -32,6 +32,7 @@ mod security;
 mod session;
 mod settings;
 mod state;
+mod tray;
 mod vision;
 mod ytapi;
 

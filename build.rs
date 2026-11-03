@@ -34,7 +34,13 @@ fn main() {
         "qml/settings/PrivacyList.qml",
         "qml/settings/Diagnostics.qml",
         "qml/settings/FolderPicker.qml",
+        "qml/TransportControls.qml",
+        "qml/MiniPlayer.qml",
+        "qml/MiniPlayerContent.qml",
+        "qml/TrayController.qml",
     ]))
+    // bundled fallback tray icon (used when the desktop icon theme has no `multimedia-audio-player`)
+    .qrc_resources(["qml/icons/ytm-tray.svg"])
     .qt_module("Quick")
     .qt_module("Qml")
     .files([
@@ -49,6 +55,7 @@ fn main() {
         "src/errors.rs",
         "src/nav.rs",
         "src/settings.rs",
+        "src/tray.rs",
     ])
     .build();
 }

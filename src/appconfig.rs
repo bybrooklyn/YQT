@@ -33,9 +33,11 @@ pub mod qobject {
         #[qproperty(bool, reduce_motion)]
         #[qproperty(QString, theme)]
         #[qproperty(QString, density)]
-        // window
+        // window / tray / mini-player
         #[qproperty(bool, close_to_tray)]
         #[qproperty(bool, mini_always_on_top)]
+        #[qproperty(bool, remember_geometry)]
+        #[qproperty(QString, key_mini_player)]
         // keyboard shortcuts as JSON {"play_pause": "Space", ...}
         #[qproperty(QString, shortcuts_json)]
         // lyrics
@@ -64,6 +66,8 @@ pub struct AppConfigRust {
     density: QString,
     close_to_tray: bool,
     mini_always_on_top: bool,
+    remember_geometry: bool,
+    key_mini_player: QString,
     shortcuts_json: QString,
     lyrics_size_scale: f64,
     lyrics_karaoke: bool,
@@ -95,6 +99,8 @@ impl AppConfigRust {
             density: QString::from(&c.appearance.density),
             close_to_tray: c.window.close_to_tray,
             mini_always_on_top: c.window.mini_always_on_top,
+            remember_geometry: c.window.remember_geometry,
+            key_mini_player: QString::from(c.keys.mini_player.as_str()),
             shortcuts_json: shortcuts_json(c),
             lyrics_size_scale: c.lyrics.size_scale.clamp(0.5, 3.0),
             lyrics_karaoke: c.lyrics.karaoke,
@@ -136,6 +142,8 @@ impl qobject::AppConfig {
         self.as_mut().set_density(n.density);
         self.as_mut().set_close_to_tray(n.close_to_tray);
         self.as_mut().set_mini_always_on_top(n.mini_always_on_top);
+        self.as_mut().set_remember_geometry(n.remember_geometry);
+        self.as_mut().set_key_mini_player(n.key_mini_player);
         self.as_mut().set_shortcuts_json(n.shortcuts_json);
         self.as_mut().set_lyrics_size_scale(n.lyrics_size_scale);
         self.as_mut().set_lyrics_karaoke(n.lyrics_karaoke);
