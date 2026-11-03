@@ -18,6 +18,7 @@ mod mpris;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "mpris_stub.rs"]
 mod mpris_stub_check;
+mod nav;
 mod pagedata;
 mod pages;
 mod platform;

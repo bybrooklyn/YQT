@@ -177,19 +177,7 @@ Kirigami.ApplicationWindow {
     }
     AddToPlaylistDialog { id: addDialog }
 
-    globalDrawer: Kirigami.GlobalDrawer {
-        title: qsTr("YT Music")
-        titleIcon: "multimedia-audio-player"
-        actions: [
-            Kirigami.Action { text: qsTr("Home"); icon.name: "go-home"; onTriggered: root.go("home") },
-            Kirigami.Action { text: qsTr("Explore"); icon.name: "view-list-icons"; onTriggered: root.go("explore") },
-            Kirigami.Action { text: qsTr("Library"); icon.name: "folder-music"; onTriggered: root.go("library") },
-            Kirigami.Action { text: qsTr("Now Playing"); icon.name: "media-playback-start"; enabled: Player.hasTrack; onTriggered: root.showNowPlaying("queue") },
-            Kirigami.Action { text: qsTr("Queue"); icon.name: "view-media-playlist"; onTriggered: root.go("queue") },
-            Kirigami.Action { text: qsTr("Settings"); icon.name: "configure"; onTriggered: root.go("settings") }
-            , Kirigami.Action { text: root.visibility === Window.FullScreen ? qsTr("Exit Full Screen") : qsTr("Full Screen"); icon.name: root.visibility === Window.FullScreen ? "view-restore" : "view-fullscreen"; onTriggered: root.toggleFullScreen() }
-        ]
-    }
+    globalDrawer: NavDrawer {}
 
     footer: NowPlayingBar {}
 

@@ -14,9 +14,18 @@ fn main() {
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
+        "qml/Card.qml",
+        "qml/ArtistChip.qml",
+        "qml/ExpandableText.qml",
+        "qml/StatChips.qml",
+        "qml/Shelf.qml",
+        "qml/TrackRow.qml",
+        "qml/Hero.qml",
+        "qml/RichPage.qml",
+        "qml/NavDrawer.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs", "src/nav.rs"])
     .build();
 }

@@ -88,11 +88,18 @@ pub fn album(a: &AlbumItem, section: &str) -> Value {
     item(&a.name, sub.join(" • "), String::new(), "album", "", &a.id, thumb(&a.cover), String::new(), section)
 }
 
+/// "1.2M subscribers", "35K subscribers", "812 subscribers".
+pub fn subscribers(n: u64) -> String {
+    match n {
+        1_000_000.. => format!("{:.1}M subscribers", n as f64 / 1e6),
+        1_000.. => format!("{}K subscribers", n / 1000),
+        _ => format!("{n} subscribers"),
+    }
+}
+
 pub fn artist(a: &ArtistItem, section: &str) -> Value {
     let sub = match a.subscriber_count {
-        Some(n) if n >= 1_000_000 => format!("Artist • {:.1}M subscribers", n as f64 / 1e6),
-        Some(n) if n >= 1_000 => format!("Artist • {}K subscribers", n / 1000),
-        Some(n) => format!("Artist • {n} subscribers"),
+        Some(n) => format!("Artist • {}", subscribers(n)),
         None => "Artist".into(),
     };
     item(&a.name, sub, String::new(), "artist", "", &a.id, thumb(&a.avatar), String::new(), section)
@@ -248,6 +255,13 @@ mod tests {
         assert_eq!(p["title"], "Title");
         let titles: Vec<&str> = p["items"].as_array().unwrap().iter().map(|i| i["title"].as_str().unwrap()).collect();
         assert_eq!(titles, ["one", "two"]);
+    }
+
+    #[test]
+    fn subscriber_counts_are_abbreviated() {
+        assert_eq!(subscribers(812), "812 subscribers");
+        assert_eq!(subscribers(35_400), "35K subscribers");
+        assert_eq!(subscribers(1_300_000), "1.3M subscribers");
     }
 
     #[test]
