@@ -20,6 +20,11 @@ Only this file may touch `MediaPlayer`. The Rust audio engine replaces its insid
 `SectionStyle = List | NumberedList | Cards | Artists | Grid`; `Item` mirrors the loose JSON fields QML already uses
 (`kind, title, subtitle, artist, videoId, browseId, thumbnail, duration, artistId, albumId, number`), camelCase on the wire.
 `PageData::cleaned()` drops dead items/sections. `Item::from_value` adapts today's `items.rs` JSON.
+**Loading seam (`src/pages/mod.rs`)** — the only entry point the page controller calls:
+`pages::load(&Request { target, query, filter }) -> Result<PageData, AppError>`, `pages::more(pager) -> Result<PageData, AppError>`
+(only the *new* items), `pages::home_loaders() -> Vec<HomeRow { slot, load }>` (run concurrently, show rows as they finish).
+Today it adapts the legacy JSON loaders in `backend.rs`; the rich-pages stream replaces the internals (`src/pages/{home,album,artist,playlist,library}.rs`)
+behind the same signatures. Targets: `home`, `explore`, `album:ID`, `playlist:ID` (`LIKED` = liked music), `artist:ID`, `library:<playlists|albums|artists|songs|history>`.
 Rules: every list row/card has a cover (the QML `CoverImage` shows a themed placeholder; never leave art blank), `wikipedia_url` must be `https`.
 
 ## Errors (`src/errors.rs`)

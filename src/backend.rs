@@ -17,7 +17,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Mutex;
 
-type Res = Result<Value, String>;
+pub(crate) type Res = Result<Value, String>;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -232,7 +232,7 @@ fn paged(title: &str, subtitle: &str, thumbnail: &str, pager: Pager, auth: bool)
     v
 }
 
-async fn more(key: i32) -> Res {
+pub(crate) async fn more(key: i32) -> Res {
     let (mut pager, auth) = PAGERS.lock().unwrap().get_or_insert_default().remove(&key).ok_or("No more results")?;
     let from = pager.len();
     let q = if auth { authed() } else { st().rp.query() };
@@ -250,7 +250,7 @@ async fn more(key: i32) -> Res {
 
 // ---------------------------------------------------------------------------------------------
 
-async fn search(q: String, filter: String) -> Res {
+pub(crate) async fn search(q: String, filter: String) -> Res {
     let lib = &crate::config::get().library;
     let query = st().rp.query();
     let sec = |s: &str| s.to_owned();
@@ -294,11 +294,11 @@ async fn suggest(q: String) -> Res {
 // ---- Home, one independent loader per row -----------------------------------------------------------
 // Each returns the items of its row. Slots fix the order on the page, so rows can arrive in any order.
 
-type Row = Result<Vec<Value>, String>;
-type RowFuture = std::pin::Pin<Box<dyn Future<Output = Row> + Send>>;
+pub(crate) type Row = Result<Vec<Value>, String>;
+pub(crate) type RowFuture = std::pin::Pin<Box<dyn Future<Output = Row> + Send>>;
 
 /// "Listen again" from the history, plus a radio seeded from the last song. Empty when signed out.
-async fn home_personal() -> Row {
+pub(crate) async fn home_personal() -> Row {
     if !LOGGED.load(Ordering::Relaxed) {
         return Ok(Vec::new());
     }
@@ -319,7 +319,7 @@ async fn home_personal() -> Row {
     Ok(v)
 }
 
-async fn home_charts() -> Row {
+pub(crate) async fn home_charts() -> Row {
     let n = crate::config::get().library.home_items;
     let c = st().rp.query().music_charts(None).await.map_err(err)?;
     let mut v = Vec::new();
@@ -330,12 +330,12 @@ async fn home_charts() -> Row {
     Ok(v)
 }
 
-async fn home_new_albums() -> Row {
+pub(crate) async fn home_new_albums() -> Row {
     let n = crate::config::get().library.home_items;
     Ok(st().rp.query().music_new_albums().await.map_err(err)?.iter().take(n).map(|a| album(a, "New albums & singles")).collect())
 }
 
-async fn home_new_videos() -> Row {
+pub(crate) async fn home_new_videos() -> Row {
     let n = crate::config::get().library.home_items;
     Ok(st().rp.query().music_new_videos().await.map_err(err)?.iter().take(n).map(|t| track(t, "New music videos", "")).collect())
 }
@@ -430,7 +430,7 @@ async fn library(kind: &str) -> Res {
     })
 }
 
-async fn browse(target: String) -> Res {
+pub(crate) async fn browse(target: String) -> Res {
     let q = st().rp.query();
     let (kind, id) = target.split_once(':').unwrap_or((target.as_str(), ""));
     match kind {
