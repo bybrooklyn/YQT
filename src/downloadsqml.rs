@@ -106,7 +106,7 @@ impl Default for DownloadsRust {
     fn default() -> Self {
         Self {
             used_bytes: 0,
-            cap_bytes: i64::try_from(rules::cap_bytes(crate::config::get().downloads.cap_gb)).unwrap_or(i64::MAX),
+            cap_bytes: i64::try_from(rules::cap_bytes(crate::config::current().downloads.cap_gb)).unwrap_or(i64::MAX),
             active_count: 0,
             paused: false,
             pause_reason: QString::default(),

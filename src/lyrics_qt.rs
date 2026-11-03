@@ -121,7 +121,7 @@ impl qobject::Lyrics {
 
         let th = self.qt_thread();
         crate::state::st().rt.spawn(async move {
-            let cfg = crate::config::get();
+            let cfg = crate::config::current();
             let dir = crate::lyrics::cache::default_dir();
             let result =
                 crate::lyrics::resolve(crate::state::http(), &cfg.lyrics, cfg.security.allow_insecure_urls, &q, dir.as_deref()).await;

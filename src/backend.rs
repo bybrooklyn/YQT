@@ -267,7 +267,7 @@ pub(crate) async fn more(key: i32) -> Res {
 // ---------------------------------------------------------------------------------------------
 
 pub(crate) async fn search(q: String, filter: String) -> Res {
-    let lib = &crate::config::get().library;
+    let lib = &crate::config::current().library;
     let query = st().rp.query();
     let sec = |s: &str| s.to_owned();
     Ok(match filter.as_str() {
@@ -304,7 +304,7 @@ pub(crate) async fn search(q: String, filter: String) -> Res {
 
 pub(crate) async fn suggest(q: String) -> Res {
     let s = st().rp.query().music_search_suggestion(&q).await.map_err(err)?;
-    Ok(json!(s.terms.into_iter().take(crate::config::get().library.suggestions).collect::<Vec<_>>()))
+    Ok(json!(s.terms.into_iter().take(crate::config::current().library.suggestions).collect::<Vec<_>>()))
 }
 
 // ---- Home, one independent loader per row -----------------------------------------------------------
@@ -318,7 +318,7 @@ pub(crate) async fn home_personal() -> Row {
     if !LOGGED.load(Ordering::Relaxed) {
         return Ok(Vec::new());
     }
-    let lib = &crate::config::get().library;
+    let lib = &crate::config::current().library;
     let aq = authed();
     let hist = with_retry(|| aq.music_history()).await.map_err(err)?;
     let mut seen = HashSet::new();
@@ -336,7 +336,7 @@ pub(crate) async fn home_personal() -> Row {
 }
 
 pub(crate) async fn home_charts() -> Row {
-    let n = crate::config::get().library.home_items;
+    let n = crate::config::current().library.home_items;
     let c = st().rp.query().music_charts(None).await.map_err(err)?;
     let mut v = Vec::new();
     v.extend(c.trending_tracks.iter().take(n).map(|t| track(t, "Trending", "")));
@@ -347,12 +347,12 @@ pub(crate) async fn home_charts() -> Row {
 }
 
 pub(crate) async fn home_new_albums() -> Row {
-    let n = crate::config::get().library.home_items;
+    let n = crate::config::current().library.home_items;
     Ok(st().rp.query().music_new_albums().await.map_err(err)?.iter().take(n).map(|a| album(a, "New albums & singles")).collect())
 }
 
 pub(crate) async fn home_new_videos() -> Row {
-    let n = crate::config::get().library.home_items;
+    let n = crate::config::current().library.home_items;
     Ok(st().rp.query().music_new_videos().await.map_err(err)?.iter().take(n).map(|t| track(t, "New music videos", "")).collect())
 }
 
@@ -529,12 +529,12 @@ async fn load_liked() {
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
     let aq = authed();
     let Ok(mut tracks) = liked_tracks(&aq).await else { return };
-    let _ = tracks.extend_limit(&aq, crate::config::get().library.liked_limit).await;
+    let _ = tracks.extend_limit(&aq, crate::config::current().library.liked_limit).await;
     // Merge instead of replacing: pages the user already browsed may hold songs beyond the limit.
     liked_set(|s| s.extend(tracks.items.iter().map(|t| t.id.clone())));
     LIKED_DIRTY.store(true, Ordering::Relaxed);
     // The smart-download rule "keep liked songs" gets its input here (it does nothing unless smart downloads are on).
-    if crate::config::get().downloads.smart_enabled {
+    if crate::config::current().downloads.smart_enabled {
         let items = tracks
             .items
             .iter()

@@ -39,7 +39,7 @@ pub fn parse_client_version(cache: &Value) -> Option<String> {
 }
 
 pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
-    let yt = &crate::config::get().youtube;
+    let yt = &crate::config::current().youtube;
     let origin = yt.music_origin.as_str();
     let version_owned = client_version();
     let version = version_owned.as_str();
@@ -60,7 +60,7 @@ pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
 }
 
 fn web_remix_context() -> Value {
-    let yt = &crate::config::get().youtube;
+    let yt = &crate::config::current().youtube;
     json!({"client": {"clientName": "WEB_REMIX", "clientVersion": client_version(), "hl": yt.language}})
 }
 

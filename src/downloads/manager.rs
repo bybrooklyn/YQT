@@ -381,7 +381,7 @@ pub fn dir_for(cfg_dir: &str, data_dir: &Path) -> PathBuf {
 
 impl Settings {
     pub fn load() -> Settings {
-        let d = &crate::config::get().downloads;
+        let d = &crate::config::current().downloads;
         Settings {
             dir: dir_for(&d.dir, &crate::state::data_dir()),
             quality: d.quality.clone(),

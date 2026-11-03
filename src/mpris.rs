@@ -245,9 +245,9 @@ pub fn start(forward: impl Fn(&str, i64) + Send + Sync + 'static) {
                 Ok(c) => {
                     let _ = CONN.set(c);
                 }
-                Err(e) => eprintln!("MPRIS unavailable: {e}"),
+                Err(e) => tracing::info!("MPRIS unavailable: {e}"),
             },
-            Err(e) => eprintln!("MPRIS unavailable: {e}"),
+            Err(e) => tracing::info!("MPRIS unavailable: {e}"),
         }
     });
 }

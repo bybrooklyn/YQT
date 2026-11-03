@@ -406,7 +406,7 @@ where
                     }
                 }
             },
-            |e| eprintln!("audio output error: {e}"),
+            |e| tracing::warn!("audio output error: {e}"),
             None,
         )
         .map_err(|e| format!("cannot open the output device: {e}"))

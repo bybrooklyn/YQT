@@ -204,7 +204,7 @@ async fn resolve(id: &str, playing: bool) -> Result<String, String> {
         return Ok(url);
     }
     if let Some((url, at)) = CACHE.lock().unwrap().get_or_insert_default().get(id) {
-        if at.elapsed() < Duration::from_secs(crate::config::get().playback.stream_cache_minutes * 60) {
+        if at.elapsed() < Duration::from_secs(crate::config::current().playback.stream_cache_minutes * 60) {
             return Ok(url.clone());
         }
     }
@@ -214,7 +214,7 @@ async fn resolve(id: &str, playing: bool) -> Result<String, String> {
             (u, crate::vision::user_agent().to_owned())
         }
         Err(e) => {
-            eprintln!("visionOS route failed ({e}); falling back to RustyPipe");
+            tracing::warn!("visionOS route failed ({e}); falling back to RustyPipe");
             let p = match st().rp.query().player(id).await {
                 Ok(p) => p,
                 Err(e2) => {
@@ -274,7 +274,7 @@ impl qobject::Player {
     /// Tell the smart-download rules what is coming up in the queue and what was played recently.
     /// They only act when `downloads.smart_enabled` is on; this just keeps their inputs current.
     fn feed_smart_downloads(&self, i: usize) {
-        let cfg = crate::config::get();
+        let cfg = crate::config::current();
         if !cfg.downloads.smart_enabled {
             return;
         }
@@ -314,7 +314,7 @@ impl qobject::Player {
 
         self.feed_smart_downloads(i);
 
-        let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::get().playback.prefetch_next);
+        let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::current().playback.prefetch_next);
         let th = self.qt_thread();
         st().rt.spawn(async move {
             let r = resolve(&vid, true).await;
@@ -496,7 +496,7 @@ impl qobject::Player {
         } else if *self.repeat() == 1 {
             self.load(0);
         } else {
-            if crate::config::get().playback.autoplay_radio {
+            if crate::config::current().playback.autoplay_radio {
                 self.fetch_radio(true);
             }
         }
@@ -546,7 +546,7 @@ impl qobject::Player {
     fn test_stream(self: Pin<&mut Self>) {
         let th = self.qt_thread();
         st().rt.spawn(async move {
-            let pb = &crate::config::get().playback;
+            let pb = &crate::config::current().playback;
             let id = pb.check_video_id.as_str();
             let msg = match crate::vision::audio_url(id).await {
                 Err(e) => format!("visionOS route failed: {e}"),

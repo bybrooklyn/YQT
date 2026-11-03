@@ -167,7 +167,7 @@ impl qobject::Equalizer {
             std::thread::sleep(Duration::from_millis(600));
             if SAVE_GEN.load(Ordering::SeqCst) == generation {
                 if let Err(e) = presets::save(&path, &snapshot) {
-                    eprintln!("could not save the equalizer settings: {e}");
+                    tracing::warn!("could not save the equalizer settings: {e}");
                 }
             }
         });
@@ -277,7 +277,7 @@ impl qobject::Equalizer {
     fn persist(&self) {
         SAVE_GEN.fetch_add(1, Ordering::SeqCst); // cancel the pending debounced save
         if let Err(e) = presets::save(&self.rust().path, &self.file_snapshot()) {
-            eprintln!("could not save the equalizer settings: {e}");
+            tracing::warn!("could not save the equalizer settings: {e}");
         }
     }
 }

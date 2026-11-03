@@ -49,14 +49,14 @@ pub struct ReporterRust {
 
 impl Default for ReporterRust {
     fn default() -> Self {
-        let r = &config::get().reporting;
+        let r = &config::current().reporting;
         Self { tracker: PlayTracker::new(r.min_play_secs, r.enabled), started: std::time::Instant::now() }
     }
 }
 
 impl qobject::Reporter {
     fn track_changed(self: Pin<&mut Self>, video_id: &QString) {
-        let r = &config::get().reporting;
+        let r = &config::current().reporting;
         // Signed out → never report. Checked per track so signing in/out takes effect immediately.
         let active = r.enabled && crate::auth::stored_cookie().is_some();
         let me = self.rust_mut().get_mut();
@@ -78,7 +78,7 @@ impl qobject::Reporter {
 pub fn spawn_report(video_id: String) {
     crate::state::st().rt.spawn(async move {
         if let Err(e) = report_play(&video_id).await {
-            eprintln!("play report for {video_id} failed: {e}");
+            tracing::warn!("play report for {video_id} failed: {e}");
         }
     });
 }
@@ -260,7 +260,7 @@ pub async fn report_with(deps: &Deps, tracking_url: &str, headers: &[(&'static s
 /// Report one play of `video_id` (signed-in WEB_REMIX metadata call, then the tracking GET).
 /// Honours `[reporting]`; returns a `Result` only so the caller can log it.
 pub async fn report_play(video_id: &str) -> Result<(), String> {
-    let cfg = &config::get().reporting;
+    let cfg = &config::current().reporting;
     if !cfg.enabled {
         return Ok(());
     }
