@@ -223,7 +223,15 @@ impl Pager {
             Pager::Tracks(p, s, c) => p.items.iter().skip(from).map(|x| track(x, s, c)).collect(),
             Pager::Albums(p, s) => p.items.iter().skip(from).map(|x| album(x, s)).collect(),
             Pager::Artists(p, s) => p.items.iter().skip(from).map(|x| artist(x, s)).collect(),
-            Pager::Playlists(p, s) => p.items.iter().skip(from).map(|x| playlist(x, s)).collect(),
+            Pager::Playlists(p, s) => {
+                let rows = p.items.iter().skip(from).map(|x| playlist(x, s)).collect();
+                // YouTube's own "Liked Music" (`LM`) is shown once, as the first row of the library (see `library`).
+                if from == 0 {
+                    rows
+                } else {
+                    without_youtube_liked(rows)
+                }
+            }
         }
     }
     async fn extend(&mut self, q: &RustyPipeQuery) -> Result<(), RpError> {
@@ -233,6 +241,32 @@ impl Pager {
             Pager::Artists(p, ..) => p.extend(q).await.map(|_| ()),
             Pager::Playlists(p, ..) => p.extend(q).await.map(|_| ()),
         }
+    }
+}
+
+fn is_youtube_liked(row: &Value) -> bool {
+    matches!(row["browseId"].as_str(), Some("LM" | "VLLM"))
+}
+
+fn without_youtube_liked(rows: Vec<Value>) -> Vec<Value> {
+    rows.into_iter().filter(|r| !is_youtube_liked(r)).collect()
+}
+
+/// Exactly one "Liked music" row, always first. YouTube's own playlist wins when it is on this page (it has the real
+/// cover); otherwise ours stands in. Both open through the same working path (`LIKED`).
+fn liked_row_first(items: &mut Vec<Value>) {
+    match items.iter().position(is_youtube_liked) {
+        Some(at) => {
+            let mut row = items.remove(at);
+            row["browseId"] = json!("LIKED");
+            items.insert(0, row);
+        }
+        None => items.insert(
+            0,
+            json!({"title": "Liked music", "subtitle": "Playlist", "artist": "", "kind": "playlist",
+            "videoId": "", "browseId": "LIKED", "thumbnail": "", "duration": "", "section": "Playlists",
+            "artistId": "", "albumId": ""}),
+        ),
     }
 }
 
@@ -438,12 +472,7 @@ async fn library(kind: &str) -> Res {
             let p = with_retry(|| aq.music_saved_playlists()).await.map_err(err)?;
             let mut v = paged("", "", "", Pager::Playlists(p, "Playlists".into()), true);
             if let Some(items) = v["items"].as_array_mut() {
-                items.insert(
-                    0,
-                    json!({"title": "Liked music", "subtitle": "Playlist", "artist": "", "kind": "playlist",
-                    "videoId": "", "browseId": "LIKED", "thumbnail": "", "duration": "", "section": "Playlists",
-                    "artistId": "", "albumId": ""}),
-                );
+                liked_row_first(items);
             }
             v
         }
@@ -684,6 +713,48 @@ impl qobject::Backend {
             ytapi::add_to_playlist(&p, &v).await?;
             Ok(json!({"added": true}))
         })
+    }
+}
+
+#[cfg(test)]
+mod liked_tests {
+    use super::*;
+
+    fn row(title: &str, id: &str, thumb: &str) -> Value {
+        json!({"title": title, "browseId": id, "thumbnail": thumb})
+    }
+
+    fn liked_count(rows: &[Value]) -> usize {
+        rows.iter().filter(|r| r["browseId"] == "LIKED").count()
+    }
+
+    #[test]
+    fn a_synthetic_row_stands_in_when_youtubes_is_not_on_the_page() {
+        let mut rows = vec![row("Mix", "PL1", "m.jpg")];
+        liked_row_first(&mut rows);
+        assert_eq!(rows[0]["title"], "Liked music");
+        assert_eq!(liked_count(&rows), 1);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn youtubes_liked_playlist_replaces_ours_and_keeps_its_cover() {
+        for lm in ["LM", "VLLM"] {
+            let mut rows = vec![row("Mix", "PL1", "m.jpg"), row("Liked Music", lm, "purple.jpg")];
+            liked_row_first(&mut rows);
+            assert_eq!(liked_count(&rows), 1, "{lm}");
+            assert_eq!(rows[0]["thumbnail"], "purple.jpg", "{lm}: the real cover is kept");
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|r| !is_youtube_liked(r)));
+        }
+    }
+
+    #[test]
+    fn later_pages_never_repeat_it() {
+        let rows = vec![row("A", "PL2", ""), row("Liked Music", "LM", "p.jpg"), row("B", "PL3", "")];
+        let kept = without_youtube_liked(rows);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|r| !is_youtube_liked(r)));
     }
 }
 

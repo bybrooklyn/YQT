@@ -22,6 +22,10 @@ Kirigami.ApplicationWindow {
     Connections {
         target: Backend
         function onLoggedInChanged() { root.pageCache = ({}) }
+        // A like YouTube refused: the heart has already been put back; say why instead of failing silently.
+        function onLikeFailed(videoId, message) {
+            root.showPassiveNotification(qsTr("Couldn’t update your liked songs: %1").arg(message.split("\n\n")[0]), "long")
+        }
     }
     // Playback lives in QtMultimedia; the Rust Player resolves URLs and owns the queue.
     property alias media: media
@@ -30,7 +34,10 @@ Kirigami.ApplicationWindow {
         id: media
         source: Player.source
         audioOutput: AudioOutput { volume: Math.pow(Player.volume, 2) }
-        onSourceChanged: if (source.toString() !== "" && Player.autoplay) play()
+        onSourceChanged: {
+            clock.snap(0, Date.now()); root.smoothPosition = 0
+            if (source.toString() !== "" && Player.autoplay) play()
+        }
         onErrorOccurred: (error, errorString) => Player.mediaFailed(errorString)
         onPlaybackStateChanged: root.syncMpris()
         onDurationChanged: root.syncMpris()
@@ -44,6 +51,29 @@ Kirigami.ApplicationWindow {
             }
         }
     }
+
+    // Smooth progress: the player only reports its position a few times a second. This extrapolates between the
+    // reports on every frame (the rule lives in Rust, src/clock.rs), so the progress bar and the lyrics glide
+    // instead of stepping. Read `smoothPosition` for anything shown; call `seek()` to jump.
+    PlaybackClock { id: clock }
+    property real smoothPosition: 0
+    readonly property bool isPlaying: media.playbackState === MediaPlayer.PlayingState
+    function resync() {
+        clock.report(media.position, Date.now(), isPlaying)
+        smoothPosition = clock.positionAt(Date.now())
+    }
+    function seek(ms) {
+        const t = Math.max(0, ms)
+        media.position = t
+        clock.snap(t, Date.now())
+        smoothPosition = t
+    }
+    Connections {
+        target: media
+        function onPositionChanged() { root.resync() }
+        function onPlaybackStateChanged() { root.resync() }
+    }
+    FrameAnimation { running: root.isPlaying; onTriggered: root.smoothPosition = clock.positionAt(Date.now()) }
 
     Settings {
         id: prefs
@@ -171,6 +201,13 @@ Kirigami.ApplicationWindow {
         pageStack.push(Qt.resolvedUrl("NowPlayingPage.qml"), {tab: tab})
     }
     function showLyrics() { showNowPlaying("lyrics") }
+
+    /// Pressing the bottom bar: while the player is open, go back to the page you were on; otherwise open the player.
+    function toggleNowPlaying() {
+        const cur = pageStack.currentItem
+        if (cur && cur.isNowPlaying && pageStack.depth > 1) pageStack.pop()
+        else showNowPlaying("queue")
+    }
 
     function addToPlaylist(item) {
         addDialog.song = item
