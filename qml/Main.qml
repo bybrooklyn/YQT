@@ -32,6 +32,7 @@ Kirigami.ApplicationWindow {
     Playback {
         id: media
         source: Player.source
+        nextSource: Player.nextSource
         volume: Player.volume
         autoplay: Player.autoplay
         onFailed: message => Player.mediaFailed(message)

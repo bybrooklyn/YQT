@@ -38,7 +38,11 @@ pub mod qobject {
         #[qproperty(QString, artist_id)] // browse ids of the current track, "" if unknown
         #[qproperty(QString, album_id)]
         #[qproperty(QString, duration)] // "m:ss" from the item
-        #[qproperty(QString, source)] // resolved stream URL for the QML MediaPlayer
+        #[qproperty(QString, source)]
+        // resolved stream URL for the QML MediaPlayer
+        // Stream URL of the track after this one, once known; empty on shuffle / repeat-one. The Rust audio engine
+        // decodes it ahead of time for gapless playback and crossfade.
+        #[qproperty(QString, next_source)]
         #[qproperty(QString, stream_status)] // which stream route is in use / last failure
         #[qproperty(bool, autoplay)] // false while a restored session is loaded but should stay paused
         #[qproperty(i64, resume_pos)] // ms to seek to once the restored track has loaded
@@ -110,6 +114,7 @@ pub struct PlayerRust {
     album_id: QString,
     duration: QString,
     source: QString,
+    next_source: QString,
     stream_status: QString,
     autoplay: bool,
     resume_pos: i64,
@@ -139,6 +144,7 @@ impl Default for PlayerRust {
             album_id: QString::default(),
             duration: QString::default(),
             source: QString::default(),
+            next_source: QString::default(),
             stream_status: QString::default(),
             autoplay: true,
             resume_pos: 0,
@@ -181,10 +187,21 @@ pub fn disable_streams() {
 }
 
 /// Resolve a playable audio stream URL for a video id (cached for 30 min).
-async fn resolve(id: &str) -> Result<String, String> {
+///
+/// A downloaded song is served from disk (no network at all, so it also works offline). `playing` says the
+/// track is about to be played, which marks a download as recently played; prefetching the next track must not.
+async fn resolve(id: &str, playing: bool) -> Result<String, String> {
     #[cfg(feature = "harness")]
     if NO_STREAMS.load(std::sync::atomic::Ordering::Relaxed) {
         return Err("Streams are switched off in the harness".to_owned());
+    }
+    let local = if playing {
+        crate::downloads::local_playback_url(id)
+    } else {
+        crate::downloads::local_source(id).map(|_| crate::proxy::download_url(id))
+    };
+    if let Some(url) = local {
+        return Ok(url);
     }
     if let Some((url, at)) = CACHE.lock().unwrap().get_or_insert_default().get(id) {
         if at.elapsed() < Duration::from_secs(crate::config::get().playback.stream_cache_minutes * 60) {
@@ -274,6 +291,7 @@ impl qobject::Player {
         self.as_mut().set_album_id(QString::from(&s(&item, "albumId")));
         self.as_mut().set_duration(QString::from(&s(&item, "duration")));
         self.as_mut().set_source(QString::default());
+        self.as_mut().set_next_source(QString::default());
         self.as_mut().set_error(QString::default());
         self.as_mut().set_autoplay(true);
         self.as_mut().set_loading(true);
@@ -281,7 +299,7 @@ impl qobject::Player {
         let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::get().playback.prefetch_next);
         let th = self.qt_thread();
         st().rt.spawn(async move {
-            let r = resolve(&vid).await;
+            let r = resolve(&vid, true).await;
             let _ = th.queue(move |mut p| {
                 if p.rust().generation != generation {
                     return;
@@ -294,7 +312,16 @@ impl qobject::Player {
                 p.as_mut().set_stream_status(health());
             });
             if let Some(n) = next_vid {
-                let _ = resolve(&n).await; // warm the cache so skips are instant
+                // warm the cache so skips are instant, and hand the URL to the audio engine for gapless playback
+                if let Ok(url) = resolve(&n, false).await {
+                    let _ = th.queue(move |mut p| {
+                        // only when that really is what plays next: not shuffled, not repeating one song, still this track
+                        let next_is_known = !*p.shuffle() && *p.repeat() != 2;
+                        if p.rust().generation == generation && next_is_known {
+                            p.as_mut().set_next_source(QString::from(&url));
+                        }
+                    });
+                }
             }
         });
     }

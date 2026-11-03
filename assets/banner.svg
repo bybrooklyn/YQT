@@ -61,7 +61,7 @@
   <g font-family="'Noto Sans','Segoe UI','Helvetica Neue',Arial,sans-serif" fill="#ffffff">
     <text x="520" y="290" font-size="132" font-weight="700" letter-spacing="-3">ytm</text>
     <text x="524" y="352" font-size="36" font-weight="400" fill="#cfe9f8">A native YouTube Music client</text>
-    <text x="524" y="412" font-size="26" font-weight="400" fill="#8fb6cf">Synced lyrics · Equalizer · Offline downloads · Pure-Rust audio</text>
+    <text x="524" y="412" font-size="26" font-weight="400" fill="#8fb6cf">Synced lyrics · Equalizer · Offline downloads</text>
     <text x="524" y="470" font-size="24" font-weight="600" fill="#4fc3f7">Rust  ·  Qt 6  ·  Kirigami</text>
   </g>
 </svg>
