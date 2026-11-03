@@ -85,6 +85,7 @@ pub fn entries() -> Vec<Entry> {
         e("home", "Home", "go-home", "browse"),
         e("explore", "Explore", "compass", "browse"),
         e("library", "Library", "folder-music", "browse"),
+        e("downloads", "Downloads", "folder-download", "browse"),
         Entry { needs_track: true, ..e("nowplaying", "Now playing", "media-playback-start", "playback") },
         Entry { badge: "queue", ..e("queue", "Queue", "view-media-playlist", "playback") },
         e("settings", "Settings", "configure", "app"),
@@ -123,8 +124,10 @@ mod tests {
     fn entries_serialise_in_the_shape_qml_reads() {
         let v = serde_json::to_value(entries()).unwrap();
         assert_eq!(v[0]["name"], "home");
-        assert_eq!(v[3]["needsTrack"], true);
-        assert_eq!(v[4]["badge"], "queue");
+        let by_name = |n: &str| v.as_array().unwrap().iter().find(|e| e["name"] == n).unwrap().clone();
+        assert_eq!(by_name("nowplaying")["needsTrack"], true);
+        assert_eq!(by_name("queue")["badge"], "queue");
+        assert_eq!(by_name("downloads")["group"], "browse");
         assert!(v[0].get("needs_track").is_none());
     }
 }

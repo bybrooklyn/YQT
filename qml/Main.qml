@@ -151,6 +151,9 @@ Kirigami.ApplicationWindow {
         case "library":
             pageStack.push(Qt.resolvedUrl("PageView.qml"), {title: qsTr("Library"), target: "library", filter: "playlists", navName: "library"})
             break
+        case "downloads":
+            pageStack.push(Qt.resolvedUrl("DownloadsPage.qml"), {navName: "downloads"})
+            break
         case "settings":
             pageStack.push(Qt.resolvedUrl("SettingsPage.qml"))
             break

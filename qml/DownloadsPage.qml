@@ -15,6 +15,9 @@ Kirigami.ScrollablePage {
     Kirigami.Theme.colorSet: Kirigami.Theme.Window
     Kirigami.Theme.colorGroup: Kirigami.Theme.Active
 
+    /// Which drawer entry is highlighted while this page is shown.
+    property string navName: "downloads"
+
     property var rows: []
     readonly property var songs: rows.filter(r => r.state === "downloaded")
 
