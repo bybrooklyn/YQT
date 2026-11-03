@@ -26,6 +26,7 @@ mod proxy;
 mod reporting;
 mod security;
 mod session;
+mod settings;
 mod state;
 mod vision;
 mod ytapi;

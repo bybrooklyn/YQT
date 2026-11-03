@@ -6,7 +6,7 @@
 //! error never stops the app – the affected value (or file) just falls back to its default.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -502,9 +502,76 @@ pub fn get() -> &'static Config {
     })
 }
 
+/// A configuration that can be replaced while the app runs (the Settings screen does this on every change).
+pub struct Live(RwLock<Config>);
+
+impl Live {
+    pub fn new(c: Config) -> Self {
+        Self(RwLock::new(c))
+    }
+    pub fn current(&self) -> Config {
+        self.0.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+    pub fn apply(&self, c: Config) {
+        *self.0.write().unwrap_or_else(|e| e.into_inner()) = c;
+    }
+}
+
+fn live() -> &'static Live {
+    static L: OnceLock<Live> = OnceLock::new();
+    L.get_or_init(|| Live::new(get().clone()))
+}
+
+/// The configuration as it is *now*: starts as the startup snapshot and follows every change made in Settings.
+/// Code that wants a setting to apply without a restart reads this per use instead of caching `get()`.
+pub fn current() -> Config {
+    live().current()
+}
+
+/// Replace the live configuration (the Settings backend calls this after a change has been saved).
+pub fn apply(c: Config) {
+    live().apply(c);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_config_is_shared_across_threads() {
+        let live = std::sync::Arc::new(Live::new(Config::default()));
+        let writers: Vec<_> = (0..4u64)
+            .map(|i| {
+                let live = live.clone();
+                std::thread::spawn(move || {
+                    for n in 0..200u64 {
+                        let mut c = live.current();
+                        c.network.retries = (i * 1000 + n) as u32;
+                        c.network.connect_timeout_secs = c.network.retries as u64; // both fields written together
+                        live.apply(c);
+                    }
+                })
+            })
+            .collect();
+        let reader = {
+            let live = live.clone();
+            std::thread::spawn(move || {
+                for _ in 0..1000 {
+                    let c = live.current();
+                    // a torn read would show two different writes
+                    assert!(c.network.retries as u64 == c.network.connect_timeout_secs || c.network.retries == 1);
+                }
+            })
+        };
+        for w in writers {
+            w.join().unwrap();
+        }
+        reader.join().unwrap();
+        let mut c = Config::default();
+        c.lyrics.enabled = false;
+        live.apply(c);
+        assert!(!live.current().lyrics.enabled);
+    }
 
     #[test]
     fn empty_file_is_all_defaults() {

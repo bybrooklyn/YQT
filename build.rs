@@ -14,9 +14,19 @@ fn main() {
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
+        "qml/settings/SettingCard.qml",
+        "qml/settings/SettingSection.qml",
+        "qml/settings/SettingRow.qml",
+        "qml/settings/ShortcutEditor.qml",
+        "qml/settings/BrowserImport.qml",
+        "qml/settings/StreamHealth.qml",
+        "qml/settings/ProviderOrder.qml",
+        "qml/settings/PrivacyList.qml",
+        "qml/settings/Diagnostics.qml",
+        "qml/settings/FolderPicker.qml",
     ]))
     .qt_module("Quick")
     .qt_module("Qml")
-    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs"])
+    .files(["src/backend.rs", "src/player.rs", "src/appconfig.rs", "src/clock.rs", "src/accent.rs", "src/reporting.rs", "src/settings.rs"])
     .build();
 }
