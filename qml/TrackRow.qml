@@ -14,7 +14,9 @@ FocusScope {
     /// Show `item.number` instead of a cover.
     property bool numbered: false
     readonly property bool current: !!item && !!item.videoId && Player.hasTrack && Player.videoId === item.videoId
-    readonly property bool hovered: area.containsMouse
+    /// Show the ⋮ button (rows that have a menu).
+    property bool showMenuButton: true
+    readonly property bool hovered: area.containsMouse || more.hovered
 
     signal activated()
     /// Right click.
@@ -50,7 +52,8 @@ FocusScope {
     }
 
     RowLayout {
-        anchors { fill: parent; leftMargin: Kirigami.Units.smallSpacing * 2; rightMargin: Kirigami.Units.largeSpacing }
+        z: 1 // above the click area, so the ⋮ button gets its own clicks
+        anchors { fill: parent; leftMargin: Kirigami.Units.smallSpacing * 2; rightMargin: Kirigami.Units.smallSpacing }
         spacing: Kirigami.Units.largeSpacing
 
         // number / play icon / cover
@@ -118,6 +121,23 @@ FocusScope {
             text: root.item ? root.item.duration : ""
             opacity: 0.65
             font.features: { "tnum": 1 }
+        }
+
+        // the same menu as a right click, for the mouse-less and the touch-minded
+        QQC2.ToolButton {
+            id: more
+            visible: root.showMenuButton
+            Layout.alignment: Qt.AlignVCenter
+            icon.name: "overflow-menu"
+            display: QQC2.AbstractButton.IconOnly
+            text: qsTr("More")
+            opacity: root.hovered || root.activeFocus || activeFocus ? 1 : 0.5
+            Kirigami.Theme.inherit: false
+            Kirigami.Theme.colorGroup: Kirigami.Theme.Active
+            QQC2.ToolTip.visible: hovered
+            QQC2.ToolTip.text: text
+            QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
+            onClicked: root.menuRequested()
         }
     }
 

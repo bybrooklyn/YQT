@@ -24,6 +24,10 @@ Kirigami.ScrollablePage {
 
     property var pageData: null
     property bool busy: false
+    /// False while the page has no songs (the hero's Play / Shuffle / Download / Add to queue wait).
+    property bool playable: true
+    /// Items drawn over the whole view (a page puts its error view here): `overlay: [ ErrorView { ... } ]`.
+    property alias overlay: overlayHost.data
     property string emptyText
     /// Greeting line used as the hero when `pageData` has none (progressive Home; see `Nav.greeting()`).
     property string greeting
@@ -104,8 +108,11 @@ Kirigami.ScrollablePage {
     property int askedFor: -1
     function checkNearEnd() {
         if (!pageData || !pageData.hasMore || busy || blocks.length === 0 || askedFor === blocks.length) return
-        const last = list.indexAt(list.contentX + 1, list.contentY + list.height - 1)
-        if (last >= blocks.length - 4 || (last < 0 && list.contentHeight <= list.height)) {
+        const last = list.indexAt(list.contentX + 1, list.contentY + list.height - 1)        // (`contentHeight` is only an estimate until delegates exist: a page shorter than the viewport counts only
+        // once its last block has really been laid out)
+        // (also a view parked past the end, e.g. after a jump made with the estimate)
+        const short = last < 0 && !!list.itemAtIndex(blocks.length - 1) && list.contentY + list.height >= list.contentHeight - 1
+        if (last >= blocks.length - 4 || short) {
             askedFor = blocks.length
             moreRequested()
         }
@@ -119,8 +126,12 @@ Kirigami.ScrollablePage {
         reuseItems: false
         cacheBuffer: Kirigami.Units.gridUnit * 30
         boundsBehavior: Flickable.StopAtBounds
-        onContentYChanged: page.checkNearEnd()
+        onContentYChanged: { page.checkNearEnd(); settle.restart() }
         onHeightChanged: page.checkNearEnd()
+        // once scrolling (or a jump) has come to rest the delegates exist: judge again
+        Timer { id: settle; interval: 150; onTriggered: page.checkNearEnd() }
+        // delegates appear (and the estimate turns into the real height) after a jump to the end: look again then
+        onContentHeightChanged: Qt.callLater(page.checkNearEnd)
 
         delegate: Loader {
             id: slot
@@ -140,6 +151,7 @@ Kirigami.ScrollablePage {
                 hero: slot.block.hero
                 artists: slot.block.artists
                 compact: page.compact
+                playable: page.playable
                 width: list.width
                 onActionTriggered: name => {
                     if (name === "play") page.playAll(false)
@@ -174,6 +186,7 @@ Kirigami.ScrollablePage {
                     width: Math.min(parent.width - 2 * x, Kirigami.Units.gridUnit * 64)
                     item: slot.block.item
                     numbered: slot.block.numbered
+                    showMenuButton: slot.block.item.kind === "song"
                     onActivated: page.activated(slot.block.item)
                     onMenuRequested: page.itemMenuRequested(slot.block.item)
                 }
@@ -209,16 +222,21 @@ Kirigami.ScrollablePage {
         }
 
         footer: Item { width: 1; height: Kirigami.Units.gridUnit }
-    }
 
-    Kirigami.LoadingPlaceholder {
-        anchors.centerIn: parent
-        visible: page.busy && page.blocks.length === 0
-    }
-    Kirigami.PlaceholderMessage {
-        anchors.centerIn: parent
-        width: parent.width - Kirigami.Units.gridUnit * 4
-        visible: !page.busy && page.blocks.length === 0 && page.emptyText.length > 0
-        text: page.emptyText
+        // placeholders and whatever the page adds through `overlay` (an error view) cover the whole view
+        Item {
+            id: overlayHost
+            anchors.fill: parent
+            Kirigami.LoadingPlaceholder {
+                anchors.centerIn: parent
+                visible: page.busy && page.blocks.length === 0
+            }
+            Kirigami.PlaceholderMessage {
+                anchors.centerIn: parent
+                width: parent.width - Kirigami.Units.gridUnit * 4
+                visible: !page.busy && page.blocks.length === 0 && page.emptyText.length > 0
+                text: page.emptyText
+            }
+        }
     }
 }

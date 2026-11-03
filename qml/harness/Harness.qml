@@ -4,7 +4,7 @@
 //   QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_ASSUME_STDERR_HAS_CONSOLE=1 \
 //     target/debug/ytm --qml $PWD/qml/harness/Harness.qml --scenario long --out /some/dir
 //
-// Scenarios: long | home | pages | errors | queue. Each drives the real ItemsPage / QueuePanel / ErrorView against
+// Scenarios: long | home | pages | errors | queue | rich (the PageView pages: album, artist, playlist, library, home). Each drives the real ItemsPage / QueuePanel / ErrorView against
 // canned data (src/page/demo.rs) with simulated input, writes PNGs to --out and prints `PASS`/`FAIL` lines
 // (QtTest's own reporting is not wired up outside qmltestrunner, so checks are plain helpers here).
 import QtQuick
@@ -23,7 +23,6 @@ Kirigami.ApplicationWindow {
     readonly property string scenario: arg("--scenario", "long")
     readonly property string outDir: arg("--out", ".")
     readonly property url itemsUrl: Qt.resolvedUrl("../ItemsPage.qml")
-
     // what the real Main.qml offers to pages
     property var opened: []
     function open(item) { opened = opened.concat([item]) }
@@ -166,6 +165,112 @@ Kirigami.ApplicationWindow {
         eq(Player.index, 2, "click: from the clicked song")
     }
 
+    // ---- the rich pages (PageView over the same controller) ---------------------------------------------------------------
+    readonly property url richUrl: Qt.resolvedUrl("../PageView.qml")
+    function showRich(target, props) {
+        pageStack.clear()
+        pageStack.push(richUrl, Object.assign({title: target, target: target}, props || {}))
+        const p = pageStack.currentItem
+        until(function () { return p.controller.state === "ready" || p.controller.state === "error" }, 4000, target + ": loaded")
+        tc.wait(700)                       // the push animation, and the first delegates
+        render(); render()
+        return p
+    }
+    function blockTypes(page) { return page.blocks.map(function (b) { return b.type }) }
+    function suffix() { return arg("--tag", "") }
+
+    function runRich() {
+        const widths = {narrow: 420, normal: 900, wide: 1500}
+        const tag = suffix()
+
+        // album: hero with artist links and stat chips, numbered tracks, two shelves
+        let page = showRich("album:rich")
+        let ctl = page.controller
+        eq(ctl.songCount, 12, "album: 12 songs")
+        ok(ctl.hasHero, "album: hero")
+        eq(page.blocks[0].type, "hero", "album: the hero is the first block")
+        eq(page.blocks[0].artists.length, 2, "album: two artist links under the title")
+        eq(page.blocks.filter(function (b) { return b.type === "shelf" }).length, 2, "album: Other versions + More by")
+        eq(page.blocks.filter(function (b) { return b.type === "row" }).length, 12, "album: 12 track rows")
+        ok(!page.blocks.some(function (b) { return b.type === "shelf" && b.section.id === "hero-artists" }), "album: hero-artists is not drawn as a shelf")
+        for (const w in widths) { win.width = widths[w]; tc.wait(250); render(); render(); shot("rich-album-" + w + tag) }
+        win.width = 900; tc.wait(200)
+
+        // hero actions reach the player / the queue / the download list
+        page.playAll(false)
+        until(function () { return Player.title === "alb song 1" }, 2000, "album: Play starts the first track")
+        eq(QueueModel.count, 12, "album: Play queues the whole album")
+        page.playAll(true)
+        until(function () { return Player.shuffle }, 2000, "album: Shuffle turns shuffle on")
+        const before = QueueModel.count
+        page.action("add_to_queue")
+        until(function () { return QueueModel.count === before + 12 }, 2000, "album: Add to queue appends the 12 songs")
+        eq(JSON.parse(ctl.songsJson()).length, 12, "album: the download list is the 12 songs")
+
+        // a track row: click plays from there; the menu opens with the item
+        page.activated(page.blocks.filter(function (b) { return b.type === "row" })[3].item)
+        until(function () { return Player.title === "alb song 4" }, 2000, "album: clicking a row plays from that track")
+        page.itemMenuRequested(page.blocks.filter(function (b) { return b.type === "row" })[1].item)
+        tc.wait(300)
+        shot("rich-album-menu" + tag)
+
+        // card activation opens the target through the window
+        const shelf = page.blocks.filter(function (b) { return b.type === "shelf" })[0]
+        page.activated(shelf.section.items[0])
+        eq(win.opened[win.opened.length - 1].kind, "album", "album: a card opens an album")
+
+        // artist: banner, bio with Read more + Wikipedia, radio from the hero
+        page = showRich("artist:rich")
+        ctl = page.controller
+        eq(page.radioId, "demo99", "artist: the radio id comes from hero-radio")
+        ok(ctl.heroWikipediaUrl.indexOf("https://") === 0, "artist: Wikipedia link is https")
+        eq(blockTypes(page).filter(function (t) { return t === "row" }).length, 5, "artist: 5 top songs")
+        for (const w in widths) { win.width = widths[w]; tc.wait(250); render(); render(); shot("rich-artist-" + w + tag) }
+        win.width = 900; tc.wait(200)
+        page.action("radio")
+        until(function () { return Player.title === "long song 0" }, 3000, "artist: Radio plays the radio playlist")
+        page.playRequested(page.blocks.filter(function (b) { return b.type === "shelf" })[0].section.items[1])
+        until(function () { return QueueModel.count === 5 }, 3000, "artist: a card's play button plays its album")
+
+        // playlist: pages in as you scroll, Save is offered but disabled
+        page = showRich("playlist:rich")
+        ctl = page.controller
+        eq(ctl.songCount, 30, "playlist: first page of 30")
+        ok(ctl.hasMore, "playlist: continues")
+        shot("rich-playlist-1" + tag)
+        page.flickable.positionViewAtEnd()
+        until(function () { return ctl.songCount === 60 }, 4000, "playlist: second page arrives on scrolling down")
+        ok(!ctl.hasMore, "playlist: and that was the last")
+        eq(page.blocks.filter(function (b) { return b.type === "row" }).length, 60, "playlist: 60 rows, one list")
+        page.flickable.positionViewAtEnd(); tc.wait(300)
+        shot("rich-playlist-2" + tag)
+
+        // library: chips from Rust, a grid of cards, the other tabs
+        page = showRich("library", {filter: "albums", navName: "library"})
+        ctl = page.controller
+        eq(ctl.chipLabels.length, 5, "library: tabs")
+        eq(page.blocks.filter(function (b) { return b.type === "shelf" }).length, 1, "library: one grid")
+        shot("rich-library" + tag)
+        ctl.selectFilter("songs")
+        until(function () { return page.blocks.some(function (b) { return b.type === "row" }) }, 3000, "library: Songs tab shows rows")
+        shot("rich-library-songs" + tag)
+
+        // home: the greeting, then rows land in slot order
+        page = showRich("home", {navName: "home"})
+        ctl = page.controller
+        until(function () { return !ctl.refreshing }, 4000, "home: all rows arrived")
+        tc.wait(300); render(); render()
+        eq(page.blocks[0].type, "hero", "home: greeting first")
+        eq(page.blocks.filter(function (b) { return b.type === "shelf" }).length, 3, "home: grid + cards + artists shelves")
+        shot("rich-home" + tag)
+        win.width = 420; tc.wait(250); render(); render(); shot("rich-home-narrow" + tag)
+        win.width = 900
+
+        // an error replaces the page
+        page = showRich("demo:error:network")
+        shot("rich-error" + tag)
+    }
+
     // ---- the error view in each kind -----------------------------------------------------------------------------------
     function runErrors() {
         for (const k of ["network", "auth", "offline", "parse", "notfound", "ratelimit"]) {
@@ -295,6 +400,7 @@ Kirigami.ApplicationWindow {
                 case "pages": win.runPages(); break
                 case "errors": win.runErrors(); break
                 case "queue": win.runQueue(); break
+                case "rich": win.runRich(); break
                 default: win.ok(false, "unknown scenario")
                 }
             } catch (e) {

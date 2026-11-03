@@ -19,6 +19,8 @@ Item {
     /// Artist items ({title, browseId, ...}) shown as links under the title.
     property var artists: []
     property bool compact: false
+    /// False while the page has no songs: Play, Shuffle, Download and Add to queue wait.
+    property bool playable: true
     readonly property string kind: hero && hero.kind ? hero.kind : ""
     readonly property bool isArtist: kind === "artist"
     readonly property bool isGreeting: !!hero && kind === ""
@@ -246,13 +248,14 @@ Item {
         spacing: Kirigami.Units.smallSpacing
         visible: actions.length > 0
 
+        // `needsSongs`: nothing to do until the page has songs; `unavailable`: no backend for it yet (tooltip says so)
         readonly property var spec: ({
-            "play": { text: qsTr("Play"), icon: "media-playback-start", primary: true },
-            "shuffle": { text: qsTr("Shuffle"), icon: "media-playlist-shuffle" },
+            "play": { text: qsTr("Play"), icon: "media-playback-start", primary: true, needsSongs: true },
+            "shuffle": { text: qsTr("Shuffle"), icon: "media-playlist-shuffle", needsSongs: true },
             "radio": { text: qsTr("Radio"), icon: "radio" },
-            "download": { text: qsTr("Download"), icon: "download" },
-            "add_to_queue": { text: qsTr("Add to queue"), icon: "list-add" },
-            "save_to_library": { text: qsTr("Save"), icon: "bookmark-new" }
+            "download": { text: qsTr("Download"), icon: "download", needsSongs: true },
+            "add_to_queue": { text: qsTr("Add to queue"), icon: "list-add", needsSongs: true },
+            "save_to_library": { text: qsTr("Save"), icon: "bookmark-new", unavailable: qsTr("Saving to your library is not available yet") }
         })
 
         Repeater {
@@ -265,6 +268,11 @@ Item {
                 id: button
                 highlighted: !!info.primary
                 visible: !!row.spec[modelData]
+                enabled: !info.unavailable && !(info.needsSongs && !root.playable)
+                opacity: enabled ? 1 : 0.5
+                QQC2.ToolTip.visible: !!info.unavailable && hovered
+                QQC2.ToolTip.text: info.unavailable || ""
+                QQC2.ToolTip.delay: Kirigami.Units.toolTipDelay
                 // the primary action is a filled accent button whatever the style draws for `highlighted`
                 background: Rectangle {
                     radius: Kirigami.Units.cornerRadius

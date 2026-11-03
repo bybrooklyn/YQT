@@ -16,7 +16,9 @@ use crate::pages::{self, HomeRow, Request};
 use crate::state::st;
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant};
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QJsonArray, QJsonObject, QJsonValue, QModelIndex, QString, QStringList, QVariant,
+};
 use serde_json::Value;
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -114,6 +116,60 @@ fn song_value(item: &Item) -> Value {
     serde_json::to_value(item).unwrap_or(Value::Null)
 }
 
+/// The page as the rich view (`RichPage.qml`) wants it: `{hero, sections: [{id, title, subtitle, style, items}], hasMore}`.
+/// Consecutive rows of one section form one section again, so a page that grew by paging is still one list.
+fn page_value(hero: Option<&Hero>, rows: &[Row], has_more: bool) -> Value {
+    let mut sections: Vec<Section> = Vec::new();
+    for r in rows {
+        match sections.last_mut() {
+            Some(s) if s.id == r.section_id && s.style == r.style => s.items.push(r.item.clone()),
+            _ => sections.push(Section {
+                id: r.section_id.clone(),
+                title: r.section.clone(),
+                subtitle: r.section_subtitle.clone(),
+                style: r.style,
+                items: vec![r.item.clone()],
+            }),
+        }
+    }
+    serde_json::json!({ "hero": hero, "sections": sections, "hasMore": has_more })
+}
+
+/// A JSON value as a `QJsonValue`, which QML sees as a plain JS object / array (no text parsing on either side).
+fn to_qjson(v: &Value) -> QJsonValue {
+    match v {
+        Value::Null => QJsonValue::default(),
+        Value::Bool(b) => QJsonValue::from(*b),
+        Value::Number(n) => n.as_i64().map_or_else(|| QJsonValue::from(n.as_f64().unwrap_or(0.0)), QJsonValue::from),
+        Value::String(s) => QJsonValue::from(&QString::from(s)),
+        Value::Array(a) => {
+            let mut arr = QJsonArray::default();
+            for x in a {
+                arr.append(&to_qjson(x));
+            }
+            QJsonValue::from(&arr)
+        }
+        Value::Object(o) => {
+            let mut obj = QJsonObject::default();
+            for (k, x) in o {
+                obj.insert(&QString::from(k), &to_qjson(x));
+            }
+            QJsonValue::from(&obj)
+        }
+    }
+}
+
+/// The songs of a loaded page (the reserved `hero-*` sections carry header data, never songs).
+fn page_songs(page: &PageData) -> Vec<Item> {
+    page.sections
+        .iter()
+        .filter(|s| !s.id.starts_with("hero-"))
+        .flat_map(|s| s.items.iter())
+        .filter(|i| i.kind == ItemKind::Song && i.is_actionable())
+        .cloned()
+        .collect()
+}
+
 // ---- the QObject ---------------------------------------------------------------------------------------------
 
 #[cxx_qt::bridge]
@@ -130,6 +186,8 @@ pub mod qobject {
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
         include!("cxx-qt-lib/qvariant.h");
         type QVariant = cxx_qt_lib::QVariant;
+        include!("cxx-qt-lib/qjsonvalue.h");
+        type QJsonValue = cxx_qt_lib::QJsonValue;
         include!("cxx-qt-lib/qmodelindex.h");
         type QModelIndex = cxx_qt_lib::QModelIndex;
         include!("cxx-qt-lib/qvector.h");
@@ -177,6 +235,8 @@ pub mod qobject {
         #[qproperty(QStringList, hero_stats)]
         #[qproperty(QStringList, hero_actions)]
         #[qproperty(QStringList, suggestions)]
+        // the whole page for the rich view (hero + sections + hasMore); see `page_value`
+        #[qproperty(QJsonValue, page_data)]
         type PageController = super::PageControllerRust;
 
         /// Load a page. `target` is `home`, `explore`, `album:ID`, `playlist:ID`, `artist:ID` or `library`;
@@ -205,6 +265,19 @@ pub mod qobject {
         /// Click on a song row: plays it (on a collection page, the whole list from there).
         #[qinvokable]
         fn play_item(self: Pin<&mut PageController>, i: i32);
+        /// Like `play_item`, for the rich view, which knows songs by video id rather than row.
+        #[qinvokable]
+        fn play_song(self: Pin<&mut PageController>, video_id: &QString);
+        #[qinvokable]
+        fn play_next_song(self: Pin<&mut PageController>, video_id: &QString);
+        #[qinvokable]
+        fn enqueue_song(self: Pin<&mut PageController>, video_id: &QString);
+        /// Load the album / playlist (`kind` + `browse_id`) and play it (hover button of a card, the artist radio).
+        #[qinvokable]
+        fn play_collection(self: Pin<&mut PageController>, kind: &QString, browse_id: &QString, shuffle: bool);
+        /// The page's songs as a JSON array, ready to hand to `Downloads.downloadAll`.
+        #[qinvokable]
+        fn songs_json(self: &PageController) -> QString;
         #[qinvokable]
         fn play_next(self: Pin<&mut PageController>, i: i32);
         #[qinvokable]
@@ -308,6 +381,7 @@ pub struct PageControllerRust {
     hero_stats: QStringList,
     hero_actions: QStringList,
     suggestions: QStringList,
+    page_data: QJsonValue,
 
     // not exposed
     rows: Vec<Row>,
@@ -343,6 +417,8 @@ impl qobject::PageController {
         self.as_mut().set_song_count(songs);
         self.as_mut().set_has_more(more);
         self.as_mut().set_loading_more(loading_more);
+        let page = to_qjson(&page_value(self.hero.as_ref(), &self.rows, more));
+        self.as_mut().set_page_data(page);
     }
 
     fn set_state_name(mut self: Pin<&mut Self>, name: &str) {
@@ -630,6 +706,10 @@ impl qobject::PageController {
         }
     }
 
+    fn song_by_id(&self, video_id: &str) -> Option<&Row> {
+        self.rows.iter().find(|r| r.is_song() && r.item.video_id == video_id)
+    }
+
     fn song_at(&self, i: i32) -> Option<&Row> {
         usize::try_from(i).ok().and_then(|i| self.rows.get(i)).filter(|r| r.is_song())
     }
@@ -700,15 +780,72 @@ impl qobject::PageController {
 
     fn play_item(self: Pin<&mut Self>, i: i32) {
         let Some(row) = self.song_at(i) else { return };
+        self.play_row_item(&row.item);
+    }
+
+    /// Play a song of this page: on a collection page the whole list from there, otherwise just that song.
+    fn play_row_item(&self, item: &Item) {
         if self.collection {
             let songs = self.assembly.songs();
-            let start = songs.iter().position(|s| s.video_id == row.item.video_id).unwrap_or(0);
+            let start = songs.iter().position(|s| s.video_id == item.video_id).unwrap_or(0);
             let values: Vec<Value> = songs.iter().map(song_value).collect();
             crate::player::with_player(move |p| p.play_many(values, start));
         } else {
-            let v = song_value(&row.item);
+            let v = song_value(item);
             crate::player::with_player(move |p| p.play_one(v));
         }
+    }
+
+    fn play_song(self: Pin<&mut Self>, video_id: &QString) {
+        if let Some(row) = self.song_by_id(&video_id.to_string()) {
+            self.play_row_item(&row.item);
+        }
+    }
+
+    fn play_next_song(self: Pin<&mut Self>, video_id: &QString) {
+        if let Some(row) = self.song_by_id(&video_id.to_string()) {
+            let v = song_value(&row.item);
+            crate::player::with_player(move |p| p.play_next_one(v));
+        }
+    }
+
+    fn enqueue_song(self: Pin<&mut Self>, video_id: &QString) {
+        if let Some(row) = self.song_by_id(&video_id.to_string()) {
+            let v = song_value(&row.item);
+            crate::player::with_player(move |p| p.enqueue_one(v));
+        }
+    }
+
+    fn play_collection(self: Pin<&mut Self>, kind: &QString, browse_id: &QString, shuffle: bool) {
+        let (kind, id) = (kind.to_string(), browse_id.to_string());
+        if !matches!(kind.as_str(), "album" | "playlist") || id.is_empty() {
+            return;
+        }
+        let fut = source().load(Request { target: format!("{kind}:{id}"), ..Default::default() });
+        st().rt.spawn(async move {
+            match fut.await {
+                Ok(page) => {
+                    let songs = page_songs(&page);
+                    if songs.is_empty() {
+                        return;
+                    }
+                    let start = if shuffle { rand::random_range(0..songs.len()) } else { 0 };
+                    let values: Vec<Value> = songs.iter().map(song_value).collect();
+                    crate::player::with_player(move |mut p| {
+                        if shuffle {
+                            p.as_mut().set_shuffle_on();
+                        }
+                        p.play_many(values, start);
+                    });
+                }
+                Err(e) => errors::toast(&e),
+            }
+        });
+    }
+
+    fn songs_json(&self) -> QString {
+        let values: Vec<Value> = self.assembly.songs().iter().map(song_value).collect();
+        QString::from(&Value::Array(values).to_string())
     }
 
     fn play_next(self: Pin<&mut Self>, i: i32) {
@@ -824,12 +961,72 @@ pub fn install_demo_source() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pagedata::SectionStyle;
 
     #[test]
     fn songs_reach_the_player_in_the_json_shape_it_stores() {
         let item = Item { kind: ItemKind::Song, title: "T".into(), video_id: "v".into(), artist_id: "UC".into(), ..Default::default() };
         let v = song_value(&item);
         assert_eq!((v["videoId"].as_str(), v["artistId"].as_str(), v["kind"].as_str()), (Some("v"), Some("UC"), Some("song")));
+    }
+
+    fn row(section: &str, style: SectionStyle, title: &str) -> Row {
+        Row {
+            item: Item { kind: ItemKind::Song, title: title.into(), video_id: title.into(), ..Default::default() },
+            section_id: section.into(),
+            section: section.to_uppercase(),
+            section_subtitle: "kicker".into(),
+            style,
+        }
+    }
+
+    #[test]
+    fn rows_regroup_into_the_sections_the_rich_view_draws() {
+        let rows = [
+            row("a", SectionStyle::List, "1"),
+            row("a", SectionStyle::List, "2"),
+            row("b", SectionStyle::Cards, "3"),
+            row("a", SectionStyle::List, "4"),
+        ];
+        let v = page_value(None, &rows, true);
+        let secs = v["sections"].as_array().unwrap();
+        assert_eq!(secs.len(), 3, "only consecutive rows of a section merge");
+        assert_eq!((secs[0]["id"].as_str(), secs[0]["items"].as_array().map(Vec::len)), (Some("a"), Some(2)));
+        assert_eq!(
+            (secs[0]["title"].as_str(), secs[0]["subtitle"].as_str(), secs[1]["style"].as_str()),
+            (Some("A"), Some("kicker"), Some("cards"))
+        );
+        assert_eq!((v["hasMore"].as_bool(), v["hero"].is_null()), (Some(true), true));
+        assert_eq!(secs[0]["items"][1]["videoId"], "2", "items keep their camelCase fields");
+    }
+
+    #[test]
+    fn a_page_that_grew_by_paging_is_still_one_section() {
+        let first = [row("tracks", SectionStyle::NumberedList, "1")];
+        let more = [row("tracks", SectionStyle::NumberedList, "2")];
+        let all: Vec<Row> = first.iter().chain(more.iter()).cloned().collect();
+        assert_eq!(page_value(None, &all, false)["sections"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hero_songs_ignore_the_reserved_sections() {
+        let song = |id: &str| Item { kind: ItemKind::Song, video_id: id.into(), ..Default::default() };
+        let page = PageData {
+            sections: vec![
+                Section { id: "hero-radio".into(), items: vec![song("r")], ..Default::default() },
+                Section { id: "tracks".into(), items: vec![song("a"), song("b")], ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(page_songs(&page).iter().map(|s| s.video_id.as_str()).collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    #[test]
+    fn json_converts_to_qt_json_without_panicking() {
+        let v = serde_json::json!({"a": [1, 2.5, "x", null, true], "b": {"c": "d"}});
+        let q = to_qjson(&v);
+        let obj = q.to_object();
+        assert_eq!(obj.len(), 2);
     }
 
     #[test]
