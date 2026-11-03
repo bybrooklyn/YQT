@@ -1,0 +1,1 @@
+This is not WebM and not MP4: the engine must report a clean error for it instead of crashing.
