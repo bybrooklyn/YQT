@@ -49,8 +49,6 @@ fn main() {
         "qml/DownloadButton.qml",
         "qml/DownloadsPage.qml",
     ]))
-    // bundled fallback tray icon (used when the desktop icon theme has no `multimedia-audio-player`)
-    .qrc_resources(["qml/icons/ytm-tray.svg"])
     .qt_module("Quick")
     .qt_module("Qml")
     .files([

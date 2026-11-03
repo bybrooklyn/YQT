@@ -5,13 +5,18 @@
 //! reads: call `update(...)` whenever the state changes, then render `entryCount()` entries via `entryId(i)`,
 //! `entryLabel(i)`, `entryEnabled(i)`, `entryChecked(i)`, `entryIsSeparator(i)`. QML never decides a label itself.
 //!
-//! Native Linux StatusNotifierItem seam: the QML side uses `Qt.labs.platform.SystemTrayIcon`, which on Plasma
-//! already registers a StatusNotifierItem through Qt's D-Bus tray backend. A hand-rolled SNI (e.g. the `ksni`
-//! crate) would only be needed to avoid depending on `Qt.labs.platform`; `tray_menu` is backend-agnostic, so such a
-//! backend could render the same `Vec<MenuEntry>`.
+//! The tray itself (Linux): a StatusNotifierItem over D-Bus via the pure-Rust `ksni` crate, so KDE Plasma, GNOME
+//! (with the AppIndicator extension) and the other desktops that implement the spec show it natively. It does
+//! **not** use `Qt.labs.platform`: that falls back to Qt Widgets classes where no native tray exists, and a
+//! `QGuiApplication` aborts on those ("Cannot create a QWidget without QApplication"). When there is no
+//! StatusNotifierWatcher (or on other systems for now) `available` stays false and the app simply has no tray.
+// `update` takes the whole tray state as plain values, which is what QML can pass.
+#![allow(clippy::too_many_arguments)]
 use core::pin::Pin;
-use cxx_qt::CxxQtType;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
+#[cfg(target_os = "linux")]
+use std::sync::{Arc, Mutex};
 
 /// What an entry does when activated (`entryId` in QML).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +109,121 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// The StatusNotifierItem backend: renders the same `Vec<MenuEntry>` the unit tests cover.
+#[cfg(target_os = "linux")]
+mod sni {
+    use super::{Action, MenuEntry};
+    use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
+    use std::sync::Arc;
+
+    /// Called (on the tray's D-Bus task) when the user picks something; the model forwards it to the Qt thread.
+    pub type OnAction = Arc<dyn Fn(Action) + Send + Sync>;
+
+    pub struct SniTray {
+        pub entries: Vec<MenuEntry>,
+        pub tooltip: String,
+        on_action: OnAction,
+        icons: Vec<ksni::Icon>,
+    }
+
+    impl SniTray {
+        pub fn new(entries: Vec<MenuEntry>, tooltip: String, on_action: OnAction) -> Self {
+            Self { entries, tooltip, on_action, icons: icons() }
+        }
+    }
+
+    /// RGBA (as decoded) → the ARGB32 byte order the StatusNotifierItem spec wants.
+    pub fn argb_from_rgba(rgba: &[u8]) -> Vec<u8> {
+        rgba.as_chunks::<4>().0.iter().flat_map(|&[r, g, b, a]| [a, r, g, b]).collect()
+    }
+
+    /// The app logo at two sizes (embedded, so the tray never depends on an icon theme).
+    fn icons() -> Vec<ksni::Icon> {
+        [&include_bytes!("../assets/tray-32.png")[..], &include_bytes!("../assets/tray-64.png")[..]]
+            .iter()
+            .filter_map(|png| image::load_from_memory_with_format(png, image::ImageFormat::Png).ok())
+            .map(|img| {
+                let img = img.to_rgba8();
+                ksni::Icon { width: img.width() as i32, height: img.height() as i32, data: argb_from_rgba(img.as_raw()) }
+            })
+            .collect()
+    }
+
+    impl ksni::Tray for SniTray {
+        fn id(&self) -> String {
+            "ytm".into()
+        }
+        fn title(&self) -> String {
+            "YT Music".into()
+        }
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            self.icons.clone()
+        }
+        fn tool_tip(&self) -> ksni::ToolTip {
+            ksni::ToolTip { title: self.tooltip.clone(), ..Default::default() }
+        }
+        fn activate(&mut self, _x: i32, _y: i32) {
+            (self.on_action)(Action::ToggleWindow);
+        }
+        fn secondary_activate(&mut self, _x: i32, _y: i32) {
+            (self.on_action)(Action::PlayPause);
+        }
+        fn menu(&self) -> Vec<MenuItem<Self>> {
+            self.entries
+                .iter()
+                .map(|e| match e {
+                    MenuEntry::Separator => MenuItem::Separator,
+                    MenuEntry::Item { action, label, enabled, checked } => {
+                        let action = *action;
+                        let activate: Box<dyn Fn(&mut SniTray) + Send> = Box::new(move |t| (t.on_action)(action));
+                        match checked {
+                            Some(c) => {
+                                CheckmarkItem { label: label.clone(), enabled: *enabled, checked: *c, activate, ..Default::default() }
+                                    .into()
+                            }
+                            None => StandardItem { label: label.clone(), enabled: *enabled, activate, ..Default::default() }.into(),
+                        }
+                    }
+                })
+                .collect()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::tray::{tray_menu, TrayState};
+        use ksni::Tray;
+        use std::sync::Mutex;
+
+        #[test]
+        fn argb_reorders_channels() {
+            assert_eq!(argb_from_rgba(&[1, 2, 3, 4, 10, 20, 30, 40]), vec![4, 1, 2, 3, 40, 10, 20, 30]);
+        }
+
+        #[test]
+        fn the_logo_loads_at_both_sizes() {
+            let icons = icons();
+            assert_eq!(icons.iter().map(|i| i.width).collect::<Vec<_>>(), [32, 64]);
+            assert!(icons.iter().all(|i| i.data.len() == (i.width * i.height * 4) as usize));
+        }
+
+        #[test]
+        fn the_menu_mirrors_the_entries_and_activation_reports_the_action() {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            let st = TrayState { playing: true, has_track: true, signed_in: true, liked: true, window_visible: true, mini_visible: false };
+            let entries = tray_menu(&st);
+            let mut tray = SniTray::new(entries.clone(), "x".into(), Arc::new(move |a| sink.lock().unwrap().push(a)));
+            let menu = tray.menu();
+            assert_eq!(menu.len(), entries.len());
+            tray.activate(0, 0);
+            tray.secondary_activate(0, 0);
+            assert_eq!(*seen.lock().unwrap(), vec![Action::ToggleWindow, Action::PlayPause]);
+        }
+    }
+}
+
 #[cxx_qt::bridge]
 pub mod qobject {
     unsafe extern "C++" {
@@ -116,9 +236,19 @@ pub mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(i32, revision)] // bumps on every change of the menu; bind to it to re-read the entries
+        #[qproperty(bool, available)] // true once a system tray really exists
         type TrayMenuModel = super::TrayMenuModelRust;
 
-        /// Recompute the menu for this state.
+        /// A tray entry was chosen: its stable id (`playpause`, `next`, `previous`, `like`, `window`, `mini`, `quit`).
+        #[qsignal]
+        fn activated(self: Pin<&mut TrayMenuModel>, action: QString);
+
+        /// Show the tray icon (Linux: registers a StatusNotifierItem). Safe to call more than once; sets
+        /// `available` only when a tray host answered.
+        #[qinvokable]
+        fn start(self: Pin<&mut TrayMenuModel>);
+
+        /// Recompute the menu and tooltip for this state (and push them to the tray when it is up).
         #[qinvokable]
         fn update(
             self: Pin<&mut TrayMenuModel>,
@@ -128,6 +258,8 @@ pub mod qobject {
             liked: bool,
             window_visible: bool,
             mini_visible: bool,
+            title: &QString,
+            artist: &QString,
         );
         #[qinvokable]
         fn entry_count(self: &TrayMenuModel) -> i32;
@@ -147,15 +279,54 @@ pub mod qobject {
         #[qinvokable]
         fn tooltip(self: &TrayMenuModel, title: &QString, artist: &QString) -> QString;
     }
+
+    impl cxx_qt::Threading for TrayMenuModel {}
 }
 
 #[derive(Default)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct TrayMenuModelRust {
     revision: i32,
+    available: bool,
     entries: Vec<MenuEntry>,
+    tooltip: String,
+    started: bool,
+    /// The running tray, once the D-Bus registration succeeded (shared with the task that creates it).
+    #[cfg(target_os = "linux")]
+    handle: Arc<Mutex<Option<Arc<ksni::Handle<sni::SniTray>>>>>,
 }
 
 impl qobject::TrayMenuModel {
+    fn start(mut self: Pin<&mut Self>) {
+        #[cfg(target_os = "linux")]
+        {
+            if self.rust().started {
+                return;
+            }
+            self.as_mut().rust_mut().get_mut().started = true;
+            let th = self.qt_thread();
+            let th_ready = th.clone();
+            let on_action: sni::OnAction = Arc::new(move |a| {
+                let id = a.id();
+                let _ = th.queue(move |mut m| m.as_mut().activated(QString::from(id)));
+            });
+            let tray = sni::SniTray::new(self.rust().entries.clone(), self.rust().tooltip.clone(), on_action);
+            let slot = self.rust().handle.clone();
+            crate::state::st().rt.spawn(async move {
+                use ksni::TrayMethods;
+                match tray.spawn().await {
+                    Ok(handle) => {
+                        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handle));
+                        let _ = th_ready.queue(|mut m| m.as_mut().set_available(true));
+                    }
+                    // No StatusNotifierWatcher / no session bus: simply no tray.
+                    Err(e) => tracing::info!("no system tray: {e}"),
+                }
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn update(
         mut self: Pin<&mut Self>,
         playing: bool,
@@ -164,13 +335,35 @@ impl qobject::TrayMenuModel {
         liked: bool,
         window_visible: bool,
         mini_visible: bool,
+        title: &QString,
+        artist: &QString,
     ) {
         let st = TrayState { playing, has_track, signed_in, liked, window_visible, mini_visible };
         let entries = tray_menu(&st);
-        if entries != self.rust().entries {
-            self.as_mut().rust_mut().get_mut().entries = entries;
-            let rev = self.revision().wrapping_add(1);
-            self.as_mut().set_revision(rev);
+        let tip = tooltip_text(&title.to_string(), &artist.to_string());
+        if entries == self.rust().entries && tip == self.rust().tooltip {
+            return;
+        }
+        {
+            let me = self.as_mut().rust_mut().get_mut();
+            me.entries = entries.clone();
+            me.tooltip = tip.clone();
+        }
+        let rev = self.revision().wrapping_add(1);
+        self.as_mut().set_revision(rev);
+        #[cfg(target_os = "linux")]
+        {
+            let running = self.rust().handle.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(handle) = running {
+                crate::state::st().rt.spawn(async move {
+                    let _ = handle
+                        .update(move |t| {
+                            t.entries = entries;
+                            t.tooltip = tip;
+                        })
+                        .await;
+                });
+            }
         }
     }
 

@@ -46,9 +46,10 @@ cpal = "0.18"
 # so views can be rendered and driven offline (see qml/harness/). Never enabled in normal builds.
 harness = []
 
-# Linux-only: MPRIS over D-Bus
+# Linux-only: MPRIS and the system tray (StatusNotifierItem) over D-Bus, both pure Rust
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 
 # Windows-only: DPAPI to unwrap the browser cookie key
 [target.'cfg(windows)'.dependencies]

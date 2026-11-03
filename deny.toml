@@ -31,6 +31,7 @@ allow = [
     "MPL-2.0",
     "Zlib",
     "CC0-1.0",
+    "Unlicense", # ksni (system tray): public-domain dedication, no conditions
     "0BSD",
     "BSL-1.0",
     "GPL-3.0",
