@@ -10,6 +10,10 @@ import org.kde.kirigami as Kirigami
 Kirigami.ScrollablePage {
     id: page
     title: qsTr("Downloads")
+    // Same surface as every other page (ScrollablePage defaults to the brighter "View" colours).
+    Kirigami.Theme.inherit: false
+    Kirigami.Theme.colorSet: Kirigami.Theme.Window
+    Kirigami.Theme.colorGroup: Kirigami.Theme.Active
 
     property var rows: []
     readonly property var songs: rows.filter(r => r.state === "downloaded")
