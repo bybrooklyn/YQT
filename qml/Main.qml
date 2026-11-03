@@ -123,11 +123,24 @@ Kirigami.ApplicationWindow {
         media.toggle()
     }
 
-    Shortcut { sequences: ["F11", StandardKey.FullScreen]; onActivated: root.toggleFullScreen() }
+    // Keyboard shortcuts come from Settings → Shortcuts (config `[keys]`, delivered as JSON by AppConfig).
+    readonly property var keys: { try { return JSON.parse(AppConfig.shortcutsJson) } catch (e) { return ({}) } }
+    // A text field must keep Space and the arrow keys for itself.
+    readonly property bool typing: !!root.activeFocusItem && root.activeFocusItem.inputMethodHints !== undefined
+    function nudgeVolume(delta) { Player.volume = Math.max(0, Math.min(1, Player.volume + delta)) }
+
+    Shortcut { sequence: root.keys.fullscreen || ""; enabled: !!root.keys.fullscreen; onActivated: root.toggleFullScreen() }
     Shortcut { sequence: "Escape"; enabled: root.visibility === Window.FullScreen; onActivated: root.visibility = Window.Windowed }
-    Shortcut { sequences: [StandardKey.Find]; onActivated: root.focusSearch() }
-    Shortcut { sequence: "Ctrl+Right"; onActivated: Player.next() }
-    Shortcut { sequence: "Ctrl+Left"; onActivated: root.previousTrack() }
+    Shortcut { sequence: root.keys.search || ""; enabled: !!root.keys.search; onActivated: root.focusSearch() }
+    Shortcut { sequence: root.keys.play_pause || ""; enabled: !!root.keys.play_pause && !root.typing; onActivated: root.togglePlay() }
+    Shortcut { sequence: root.keys.next || ""; enabled: !!root.keys.next; onActivated: Player.next() }
+    Shortcut { sequence: root.keys.previous || ""; enabled: !!root.keys.previous; onActivated: root.previousTrack() }
+    Shortcut { sequence: root.keys.now_playing || ""; enabled: !!root.keys.now_playing; onActivated: root.toggleNowPlaying() }
+    Shortcut { sequence: root.keys.lyrics || ""; enabled: !!root.keys.lyrics; onActivated: root.showLyrics() }
+    Shortcut { sequence: root.keys.volume_up || ""; enabled: !!root.keys.volume_up; onActivated: root.nudgeVolume(0.05) }
+    Shortcut { sequence: root.keys.volume_down || ""; enabled: !!root.keys.volume_down; onActivated: root.nudgeVolume(-0.05) }
+    Shortcut { sequence: root.keys.seek_forward || ""; enabled: !!root.keys.seek_forward && !root.typing; onActivated: media.seek(media.position + 5000) }
+    Shortcut { sequence: root.keys.seek_back || ""; enabled: !!root.keys.seek_back && !root.typing; onActivated: media.seek(media.position - 5000) }
     Shortcut { sequence: "Media Play"; onActivated: root.togglePlay() }
     Shortcut { sequence: "Media Next"; onActivated: Player.next() }
     Shortcut { sequence: "Media Previous"; onActivated: root.previousTrack() }
@@ -218,7 +231,20 @@ Kirigami.ApplicationWindow {
         }
     }
 
+    // Appearance → Theme: "light" / "dark" ask Qt for that colour scheme, "system" follows the desktop. This only has
+    // an effect where the active style honours the request; the KDE desktop style takes its colours from the platform
+    // colour scheme (Plasma's own setting), so there the desktop still decides.
+    function applyTheme() {
+        switch (AppConfig.theme) {
+        case "light": Qt.styleHints.colorScheme = Qt.Light; break
+        case "dark": Qt.styleHints.colorScheme = Qt.Dark; break
+        default: Qt.styleHints.colorScheme = Qt.Unknown // back to what the desktop says
+        }
+    }
+    Connections { target: AppConfig; function onThemeChanged() { root.applyTheme() } }
+
     Component.onCompleted: {
+        applyTheme()
         pageStack.columnView.columnResizeMode = Kirigami.ColumnView.SingleColumn
         Player.startMpris()
         Player.restoreSession()

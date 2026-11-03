@@ -22,7 +22,7 @@ Item {
 
     // ---- the cover's colour --------------------------------------------------------------
     Accent { id: accent; source: Player.cover }
-    readonly property color accentColor: accent.ready ? accent.color : Kirigami.Theme.highlightColor
+    readonly property color accentColor: accent.ready && AppConfig.accentFromCover ? accent.color : Kirigami.Theme.highlightColor
     readonly property color fillColor: AppConfig.lyricsTint ? accentColor : Kirigami.Theme.textColor
 
     // ---- type size follows the pane width ------------------------------------------------

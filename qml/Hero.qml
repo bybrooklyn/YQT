@@ -29,7 +29,7 @@ Item {
     readonly property string heroSubtitle: hero && hero.subtitle || ""
     readonly property string heroCover: hero && hero.cover || ""
     readonly property string heroDescription: hero && hero.description || ""
-    readonly property color tint: accent.ready ? accent.color : Kirigami.Theme.highlightColor
+    readonly property color tint: accent.ready && AppConfig.accentFromCover ? accent.color : Kirigami.Theme.highlightColor
     readonly property real coverSize: compact ? Math.min(Kirigami.Units.gridUnit * 13, width - Kirigami.Units.gridUnit * 4) : Kirigami.Units.gridUnit * 14
     readonly property real margin: compact ? Kirigami.Units.largeSpacing : Kirigami.Units.gridUnit * 1.5
 

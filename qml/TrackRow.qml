@@ -26,7 +26,8 @@ FocusScope {
     Kirigami.Theme.colorSet: Kirigami.Theme.View
     Kirigami.Theme.colorGroup: Kirigami.Theme.Active
 
-    implicitHeight: Kirigami.Units.gridUnit * (numbered ? 2.8 : 3.4)
+    // Appearance → Density: compact rows fit more songs on screen.
+    implicitHeight: Kirigami.Units.gridUnit * (numbered ? 2.8 : 3.4) * (AppConfig.density === "compact" ? 0.82 : 1)
     activeFocusOnTab: true
     Accessible.role: Accessible.Button
     Accessible.name: item ? item.title + (item.artist ? ", " + item.artist : "") : ""
