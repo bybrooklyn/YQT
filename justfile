@@ -38,6 +38,10 @@ browsers:
 # Format, lint and test – run before committing
 check: fmt-check clippy test
 
+# Dependency audit: security advisories, licences, banned crates (OpenSSL), registries
+deny:
+    cargo deny check advisories licenses bans sources
+
 fmt:
     cargo fmt
 

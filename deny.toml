@@ -40,6 +40,9 @@ allow = [
     "LGPL-2.1-or-later",
     "LGPL-3.0",
     "LGPL-3.0-or-later",
+    # webpki-roots: the bundled Mozilla CA list that makes TLS self-contained (no system trust store needed).
+    # A permissive *data* licence, fine to redistribute inside a GPL binary.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 # The list is deliberately a little wider than today's tree (audio/image crates often need ISC, CC0, ...).
@@ -50,13 +53,12 @@ exceptions = []
 multiple-versions = "warn"
 wildcards = "allow"
 highlight = "all"
-# W8 is replacing native-tls/OpenSSL (reqwest/rustypipe default-tls) with rustls. cargo-deny has no
-# per-entry "warn" for `deny`, so the ban is commented out until that lands (today it would be 3 errors:
-# openssl 0.10.82, openssl-sys 0.9.118, native-tls 0.2.18). TODO(W8 merge): uncomment.
+# The app is self-contained: TLS is rustls (pure Rust), never the system's OpenSSL. Keep it that way –
+# a dependency that re-enables `default-tls`/`native-tls` would make the app depend on a system library again.
 deny = [
-    # { crate = "openssl", use-instead = "rustls" },
-    # { crate = "openssl-sys", use-instead = "rustls" },
-    # { crate = "native-tls", use-instead = "rustls" },
+    { crate = "openssl", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+    { crate = "native-tls", use-instead = "rustls" },
 ]
 
 [sources]
