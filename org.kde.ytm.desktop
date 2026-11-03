@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=YT Music
+GenericName=Music Player
+Comment=Tiny native YouTube Music client
+Exec=ytm
+Icon=multimedia-audio-player
+Categories=Qt;KDE;AudioVideo;Audio;Player;

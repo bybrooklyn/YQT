@@ -1,0 +1,19 @@
+# build output (each worktree builds into its own target dir)
+target/
+target-*/
+/dist/
+
+# editor / tooling
+.qmlls.ini
+*.log
+*.swp
+
+# never commit user data or credentials, even by accident
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+session.json
+rustypipe_cache.json
+rustypipe_reports/
+cookies.txt
+.env

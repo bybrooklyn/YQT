@@ -1,0 +1,50 @@
+# CI for ytm. NOTE: written without being able to run it – the Linux job is the reference;
+# the Windows and macOS jobs are experimental (Kirigami has to come from KDE Craft there) and may need tweaks.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Qt 6 and Kirigami
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-base-dev qt6-declarative-dev qt6-multimedia-dev qt6-declarative-dev-tools \
+            libkf6kirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-qqc2-desktop-style \
+            libgl1-mesa-dev lld just
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # Experimental: the Rust side builds with plain Qt; the Kirigami QML module has to be available at build time too.
+  cross-platform:
+    name: ${{ matrix.os }} (experimental)
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.*"
+          modules: qtmultimedia
+          cache: true
+      # TODO: install Kirigami + qqc2-desktop-style via KDE Craft (https://community.kde.org/Craft) and point QML_IMPORT_PATH at it.
+      - run: cargo test

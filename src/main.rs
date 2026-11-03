@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: GPL-3.0-only
+mod appconfig;
+mod auth;
+mod backend;
+mod config;
+mod errors;
+mod items;
+mod lyrics;
+#[cfg(target_os = "linux")]
+mod mpris;
+#[cfg(not(target_os = "linux"))]
+#[path = "mpris_stub.rs"]
+mod mpris;
+// Keep the stub compiling (and in sync) on Linux too.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "mpris_stub.rs"]
+mod mpris_stub_check;
+mod player;
+mod proxy;
+mod session;
+mod state;
+mod vision;
+mod ytapi;
+
+use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
+
+fn main() {
+    if std::env::args().any(|a| a == "--print-config-path") {
+        println!("{}", config::path().display());
+        return;
+    }
+    if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
+        let configured = config::get().ui.style.clone();
+        let style = if !configured.is_empty() {
+            configured
+        } else if cfg!(target_os = "linux") {
+            "org.kde.desktop".to_owned() // follows the Plasma theme
+        } else {
+            "Fusion".to_owned() // ships with Qt everywhere
+        };
+        std::env::set_var("QT_QUICK_CONTROLS_STYLE", style);
+    }
+    let mut app = QGuiApplication::new();
+    // QSettings (volume, shuffle, repeat) needs these; without them it silently stores nothing.
+    if let Some(mut app) = app.as_mut() {
+        app.as_mut().set_organization_name(&QString::from("ytm"));
+        app.as_mut().set_organization_domain(&QString::from("kde.org"));
+        app.as_mut().set_application_name(&QString::from("ytm"));
+    }
+    let mut engine = QQmlApplicationEngine::new();
+    if let Some(engine) = engine.as_mut() {
+        engine.load(&QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml"));
+    }
+    if let Some(app) = app.as_mut() {
+        app.exec();
+    }
+}
