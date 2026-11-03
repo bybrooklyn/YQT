@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 mod accent;
 mod appconfig;
+mod audio;
+// The QML faces of the audio engine live next to the other bridges (cxx-qt wants them in one directory).
+mod audio_engine;
+mod audio_eq;
 mod auth;
 mod backend;
 mod clock;

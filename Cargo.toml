@@ -32,6 +32,14 @@ aes-gcm = "0.10"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 fs4 = "1.1.0"
+# Pure-Rust audio engine (no FFmpeg, no Qt Multimedia)
+symphonia = { version = "0.6", default-features = false, features = ["mkv", "isomp4", "aac"] }
+opus-rs = "0.1"
+rubato = "5"
+audioadapter-buffers = "5"
+bytes = "1"
+biquad = "0.6"
+cpal = "0.18"
 
 [features]
 # Developer-only: `ytm --qml <file>` loads a QML file instead of the app and swaps the page loaders for canned data,

@@ -10,6 +10,9 @@ fn main() {
         "qml/NowPlayingBar.qml",
         "qml/PanelSwitcher.qml",
         "qml/Playback.qml",
+        "qml/RustPlayback.qml",
+        "qml/QtPlayback.qml",
+        "qml/EqualizerPanel.qml",
         "qml/QueuePanel.qml",
         "qml/LyricsPanel.qml",
         "qml/LyricLine.qml",
@@ -64,6 +67,8 @@ fn main() {
         "src/covercache.rs",
         "src/downloadsqml.rs",
         "src/lyrics_qt.rs",
+        "src/audio_engine.rs",
+        "src/audio_eq.rs",
     ])
     .build();
 }

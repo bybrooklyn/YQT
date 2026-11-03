@@ -45,6 +45,12 @@ pub mod qobject {
         #[qproperty(bool, lyrics_karaoke)]
         #[qproperty(bool, lyrics_gap_dots)]
         #[qproperty(bool, lyrics_tint)]
+        // audio engine ("rust" or "qt"), read-only start values; the EQ's own state lives in the `Equalizer` singleton
+        #[qproperty(QString, audio_engine)]
+        #[qproperty(i32, audio_crossfade_ms)]
+        #[qproperty(bool, audio_normalize)]
+        #[qproperty(bool, audio_gapless)]
+        #[qproperty(QString, audio_output_device)]
         type AppConfig = super::AppConfigRust;
     }
 
@@ -73,6 +79,11 @@ pub struct AppConfigRust {
     lyrics_karaoke: bool,
     lyrics_gap_dots: bool,
     lyrics_tint: bool,
+    audio_engine: QString,
+    audio_crossfade_ms: i32,
+    audio_normalize: bool,
+    audio_gapless: bool,
+    audio_output_device: QString,
 }
 
 fn ms(v: u64) -> i32 {
@@ -106,6 +117,11 @@ impl AppConfigRust {
             lyrics_karaoke: c.lyrics.karaoke,
             lyrics_gap_dots: c.lyrics.gap_dots,
             lyrics_tint: c.lyrics.tint_with_accent,
+            audio_engine: QString::from(c.audio.engine.as_str()),
+            audio_crossfade_ms: ms(c.audio.crossfade_ms).min(12_000),
+            audio_normalize: c.audio.normalize,
+            audio_gapless: c.audio.gapless,
+            audio_output_device: QString::from(c.audio.output_device.as_str()),
         }
     }
 }
@@ -149,6 +165,11 @@ impl qobject::AppConfig {
         self.as_mut().set_lyrics_karaoke(n.lyrics_karaoke);
         self.as_mut().set_lyrics_gap_dots(n.lyrics_gap_dots);
         self.as_mut().set_lyrics_tint(n.lyrics_tint);
+        self.as_mut().set_audio_engine(n.audio_engine);
+        self.as_mut().set_audio_crossfade_ms(n.audio_crossfade_ms);
+        self.as_mut().set_audio_normalize(n.audio_normalize);
+        self.as_mut().set_audio_gapless(n.audio_gapless);
+        self.as_mut().set_audio_output_device(n.audio_output_device);
     }
 }
 
