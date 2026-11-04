@@ -98,12 +98,30 @@ pub fn harden_tree(dir: &Path) {
     }
 }
 
+/// The per-user folder the system reported, or an error: without one (HOME unset, a stripped-down service
+/// environment) the app must not fall back to the current directory, which could be anyone's and would then receive
+/// the session cookie, the queue and the logs.
+pub fn resolve_user_dir(found: Option<PathBuf>, what: &str) -> Result<PathBuf, String> {
+    match found {
+        Some(p) if p.is_absolute() => Ok(p),
+        _ => Err(format!("cannot find your {what} folder (is HOME set?); refusing to store your data in the current directory")),
+    }
+}
+
+/// [`resolve_user_dir`], ending the program with that message: there is no sensible way to carry on.
+pub fn user_dir_or_exit(found: Option<PathBuf>, what: &str) -> PathBuf {
+    resolve_user_dir(found, what).unwrap_or_else(|msg| {
+        eprintln!("ytm: {msg}");
+        std::process::exit(1)
+    })
+}
+
 /// Per-user data (cookies, session, RustyPipe cache). `dirs` picks the right place per OS; on Linux
 /// that is `$XDG_DATA_HOME/ytm`, exactly where older versions already kept their files.
 /// The directory is private (0700) and old permissions are tightened once per run.
 pub fn data_dir() -> PathBuf {
     static HARDENED: OnceLock<()> = OnceLock::new();
-    let dir = dirs::data_dir().unwrap_or_else(|| ".".into()).join("ytm");
+    let dir = user_dir_or_exit(dirs::data_dir(), "data").join("ytm");
     let _ = ensure_private_dir(&dir);
     HARDENED.get_or_init(|| harden_tree(&dir));
     dir
@@ -202,6 +220,16 @@ pub fn http() -> &'static reqwest::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn without_a_home_folder_the_current_directory_is_never_used() {
+        assert_eq!(resolve_user_dir(Some(PathBuf::from("/home/u/.local/share")), "data").unwrap(), PathBuf::from("/home/u/.local/share"));
+        assert!(resolve_user_dir(None, "data").is_err());
+        assert!(resolve_user_dir(Some(PathBuf::from("relative/dir")), "data").is_err(), "a relative path would depend on the cwd");
+        assert!(resolve_user_dir(Some(PathBuf::from(".")), "config").is_err());
+        let msg = resolve_user_dir(None, "config").unwrap_err();
+        assert!(msg.contains("config") && msg.contains("HOME"), "{msg}");
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ytm-state-{}-{name}", std::process::id()));

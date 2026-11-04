@@ -107,7 +107,13 @@ impl PlayerIface {
     fn seek(&self, offset_us: i64) {
         send("seek", offset_us / 1000);
     }
-    fn set_position(&self, _track: ObjectPath<'_>, position_us: i64) {
+    fn set_position(&self, track: ObjectPath<'_>, position_us: i64) {
+        // The spec: ignore the request unless it names the track that is playing now (a late request for the previous
+        // song must not seek the new one).
+        let s = snap();
+        if !s.has_track || track.as_str() != track_path(&s) {
+            return;
+        }
         send("setposition", position_us / 1000);
     }
     fn open_uri(&self, _uri: &str) {}
@@ -202,6 +208,16 @@ impl PlayerIface {
     }
 }
 
+/// The MPRIS object path that identifies the current track (`mpris:trackid`); clients must quote it in `SetPosition`.
+fn track_path(s: &Snap) -> String {
+    if s.has_track {
+        let safe: String = s.video_id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        format!("/org/kde/ytm/track/{safe}")
+    } else {
+        "/org/mpris/MediaPlayer2/TrackList/NoTrack".to_owned()
+    }
+}
+
 fn metadata(s: &Snap) -> HashMap<String, OwnedValue> {
     let mut m: HashMap<String, OwnedValue> = HashMap::new();
     let mut put = |k: &str, v: Value<'_>| {
@@ -209,13 +225,7 @@ fn metadata(s: &Snap) -> HashMap<String, OwnedValue> {
             m.insert(k.to_owned(), v);
         }
     };
-    let id = if s.has_track {
-        let safe: String = s.video_id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        format!("/org/kde/ytm/track/{safe}")
-    } else {
-        "/org/mpris/MediaPlayer2/TrackList/NoTrack".to_owned()
-    };
-    if let Ok(p) = ObjectPath::try_from(id) {
+    if let Ok(p) = ObjectPath::try_from(track_path(s)) {
         put("mpris:trackid", Value::from(p));
     }
     if s.has_track {
@@ -292,4 +302,22 @@ pub fn update(new: Snap, position_us: i64) {
             let _ = i.loop_status_changed(em).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_track_id_names_the_playing_song_and_nothing_else() {
+        let playing = Snap { has_track: true, video_id: "dQw4w9WgXcQ".into(), ..Default::default() };
+        assert_eq!(track_path(&playing), "/org/kde/ytm/track/dQw4w9WgXcQ");
+        // characters that are not valid in an object path are dropped, so the path is always valid
+        let odd = Snap { has_track: true, video_id: "a-b/c_d".into(), ..Default::default() };
+        assert_eq!(track_path(&odd), "/org/kde/ytm/track/abcd");
+        assert!(ObjectPath::try_from(track_path(&odd)).is_ok());
+        // nothing playing: the spec's NoTrack path, which never equals a real track
+        assert_eq!(track_path(&Snap::default()), "/org/mpris/MediaPlayer2/TrackList/NoTrack");
+        assert_ne!(track_path(&playing), track_path(&Snap::default()));
+    }
 }

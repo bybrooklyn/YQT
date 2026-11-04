@@ -471,7 +471,7 @@ impl Config {
 }
 
 pub fn path() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("ytm").join("config.toml")
+    crate::state::user_dir_or_exit(dirs::config_dir(), "config").join("ytm").join("config.toml")
 }
 
 /// The process-wide configuration (read once at first use).

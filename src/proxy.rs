@@ -23,6 +23,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 static URLS: Mutex<Option<HashMap<String, (String, String)>>> = Mutex::new(None);
+/// Registration order of `URLS`, oldest first, so the oldest can be dropped.
+static URL_ORDER: Mutex<std::collections::VecDeque<String>> = Mutex::new(std::collections::VecDeque::new());
+const MAX_REGISTERED_URLS: usize = 512;
+/// Simultaneous connections the proxy serves.
+const MAX_CONNECTIONS: usize = 64;
 static CTX: OnceLock<Arc<Ctx>> = OnceLock::new();
 
 const MAX_HEAD: usize = 16 * 1024;
@@ -131,9 +136,13 @@ fn serve(l: std::net::TcpListener, ctx: Arc<Ctx>, client: reqwest::Client, rt: &
     l.set_nonblocking(true).ok();
     rt.spawn(async move {
         let l = TcpListener::from_std(l).expect("proxy listener");
+        // A player opens a handful of connections; a local process opening thousands must not exhaust our descriptors.
+        let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
         while let Ok((sock, _)) = l.accept().await {
+            let Ok(permit) = slots.clone().try_acquire_owned() else { continue }; // over the limit: close it at once
             let (client, ctx) = (client.clone(), ctx.clone());
             tokio::spawn(async move {
+                let _permit = permit;
                 let _ = handle(sock, client, &ctx).await;
             });
         }
@@ -142,7 +151,20 @@ fn serve(l: std::net::TcpListener, ctx: Arc<Ctx>, client: reqwest::Client, rt: &
 
 /// Register a real stream URL and get the local URL to hand to the media player.
 pub fn local_url(id: &str, real: &str, ua: &str) -> String {
-    URLS.lock().unwrap().get_or_insert_default().insert(id.to_owned(), (real.to_owned(), ua.to_owned()));
+    {
+        let mut urls = URLS.lock().unwrap();
+        let urls = urls.get_or_insert_default();
+        let mut order = URL_ORDER.lock().unwrap();
+        if urls.insert(id.to_owned(), (real.to_owned(), ua.to_owned())).is_none() {
+            order.push_back(id.to_owned());
+        }
+        // Keep the registry bounded over a long session: forget the oldest registrations.
+        while order.len() > MAX_REGISTERED_URLS {
+            if let Some(old) = order.pop_front() {
+                urls.remove(&old);
+            }
+        }
+    }
     let c = ctx();
     match &c.token {
         Some(t) => format!("http://127.0.0.1:{}/t/{}/{}", c.port, t, id),
@@ -168,6 +190,29 @@ pub fn cover_url(hash: &str) -> String {
     base_url(&format!("cover/{hash}"))
 }
 
+/// After opening `path`, is the file we hold (`opened`) really the regular file the path names *now*? A path that is
+/// (or was swapped for) a symlink, or that now points at a different file, fails. This closes the gap between checking
+/// a path and opening it, which matters when the downloads folder is a shared, writable one.
+fn is_same_regular_file(path: &std::path::Path, opened: &std::fs::Metadata) -> bool {
+    let Ok(now) = std::fs::symlink_metadata(path) else { return false };
+    if !now.is_file() {
+        return false; // a symlink (or anything else) is never served
+    }
+    same_inode(&now, opened)
+}
+
+#[cfg(unix)]
+fn same_inode(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// (No stable inode identity on this platform; the "is a regular file, not a symlink" check above still applies.)
+#[cfg(not(unix))]
+fn same_inode(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
+}
+
 /// Serve a regular file from disk with `Range` support (200 / 206 / 416). `HEAD` sends only the headers.
 async fn serve_file(
     sock: &mut TcpStream,
@@ -181,7 +226,7 @@ async fn serve_file(
     use tokio::io::AsyncSeekExt;
     let Ok(mut file) = tokio::fs::File::open(path).await else { return reply(sock, "404 Not Found").await };
     let len = match file.metadata().await {
-        Ok(m) if m.is_file() => m.len(),
+        Ok(m) if m.is_file() && is_same_regular_file(path, &m) => m.len(),
         _ => return reply(sock, "404 Not Found").await,
     };
     let extra = if cacheable { "Cache-Control: private, max-age=86400\r\n" } else { "" };
@@ -399,6 +444,53 @@ async fn handle(mut sock: TcpStream, client: reqwest::Client, ctx: &Ctx) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_or_a_swapped_file_is_never_served() {
+        let dir = std::env::temp_dir().join(format!("ytm-proxy-sym-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("real.bin");
+        let other = dir.join("other.bin");
+        std::fs::write(&real, b"hello").unwrap();
+        std::fs::write(&other, b"secret").unwrap();
+
+        // a regular file that is what we opened: fine
+        let opened = std::fs::File::open(&real).unwrap().metadata().unwrap();
+        assert!(is_same_regular_file(&real, &opened));
+
+        // the path is a symlink to a regular file: refused
+        let link = dir.join("link.bin");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        let through_link = std::fs::File::open(&link).unwrap().metadata().unwrap();
+        assert!(!is_same_regular_file(&link, &through_link), "symlinks are never served");
+
+        // the file was swapped for another one after we opened it: refused
+        std::fs::remove_file(&real).unwrap();
+        std::fs::write(&real, b"swapped in").unwrap();
+        assert!(!is_same_regular_file(&real, &opened), "a different file now sits at that path");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_url_registry_stays_bounded() {
+        // (uses real ids, but registers only localhost-looking dummies; the proxy context is created on first use)
+        for i in 0..(MAX_REGISTERED_URLS + 50) {
+            let id = format!("bound{i:05}");
+            URLS.lock().unwrap().get_or_insert_default().insert(id.clone(), ("http://127.0.0.1:1/x".into(), "ua".into()));
+            let mut order = URL_ORDER.lock().unwrap();
+            order.push_back(id);
+            while order.len() > MAX_REGISTERED_URLS {
+                if let Some(old) = order.pop_front() {
+                    URLS.lock().unwrap().get_or_insert_default().remove(&old);
+                }
+            }
+        }
+        assert!(URL_ORDER.lock().unwrap().len() <= MAX_REGISTERED_URLS);
+        assert!(!URLS.lock().unwrap().get_or_insert_default().contains_key("bound00000"), "the oldest registration was dropped");
+        assert!(URLS.lock().unwrap().get_or_insert_default().contains_key(&format!("bound{:05}", MAX_REGISTERED_URLS + 49)));
+    }
 
     #[test]
     fn range_forms() {

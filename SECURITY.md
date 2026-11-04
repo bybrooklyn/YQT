@@ -52,7 +52,13 @@ profile anyway), a compromised OS, physical access.
 | S-21 | Low | API and watch-page bodies were read without a size cap | Fixed: `state::read_limited` (8 MiB) |
 | S-22 | Low | A failed read of `config.toml` followed by a Settings change could save the template over the user's settings | Fixed: only a missing file falls back to the template; any other read error aborts the change |
 
-Known and not yet fixed (found by the code audit, all low): `serve_file` has a symlink check-then-open race when the downloads folder is a shared, writable one; MPRIS `SetPosition` ignores the track id; two simultaneous cookie imports share one temporary folder; the data/config directory falls back to `.` when the system gives none (a hostile working directory would then receive secrets); the proxy has no cap on concurrent connections and its URL registry is never pruned.
+| S-23 | Low | `serve_file` checked a path and then opened it: in a shared, writable downloads folder it could be swapped for a symlink | Fixed: after opening, the file must still be the same regular file the path names (never a symlink); tested |
+| S-24 | Low | MPRIS `SetPosition` ignored the track id | Fixed: only a request naming the track that is playing is honoured, as the spec requires; tested |
+| S-25 | Low | Two simultaneous cookie imports shared one temporary folder, and a killed import left a plaintext cookie-DB copy behind | Fixed: one private folder per import; stale ones are swept |
+| S-26 | Low | Without a home/config folder the app fell back to `.` and would store the cookie and logs in the current directory | Fixed: it refuses to start with a clear message; tested |
+| S-27 | Low | The proxy had no limit on simultaneous connections and never pruned its URL registry | Fixed: 64 connections, 512 registrations (oldest dropped) |
+
+Nothing from the audit is open. What remains is outside the code: the Windows (DPAPI) and macOS (Keychain) paths are reviewed and type-checked but have never run, and a local process running as the same user can read anything the app can.
 
 ## What changed (summary)
 

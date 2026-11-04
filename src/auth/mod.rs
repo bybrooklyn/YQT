@@ -116,7 +116,13 @@ struct Db {
 
 /// Copy a cookie DB (plus journal/WAL) somewhere private: browsers keep the original locked.
 fn with_private_copy<T>(db: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
-    let guard = PrivateDir::create(&data_dir().join("cookie-import"))?;
+    // One private folder per import (two at once must not delete each other's copy), and any left behind by an
+    // import that was killed (power loss, SIGKILL) is swept first: it holds a plaintext copy of a cookie database.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let base = data_dir().join("cookie-import");
+    sweep_stale_imports(&base);
+    let unique = format!("{}-{}", std::process::id(), COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    let guard = PrivateDir::create(&base.join(unique))?;
     let tmp = guard.path();
     let copy = tmp.join("cookies.sqlite");
     std::fs::copy(db, &copy).map_err(|e| {
@@ -134,13 +140,28 @@ fn with_private_copy<T>(db: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -
 }
 
 /// A fresh, owner-only (0700 on unix) directory that is deleted when dropped.
+/// Remove import folders older than this: they can only be left over from an import that never got to clean up.
+const STALE_IMPORT_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+fn sweep_stale_imports(base: &Path) {
+    let Ok(rd) = std::fs::read_dir(base) else { return };
+    for e in rd.flatten() {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > STALE_IMPORT_AGE);
+        // (symlinks are not followed: `remove_dir_all` removes a link itself, and only directories are considered)
+        if old && e.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 struct PrivateDir(PathBuf);
 
 impl PrivateDir {
     fn create(path: &Path) -> Result<PrivateDir, String> {
         let _ = std::fs::remove_dir_all(path);
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            // the parent holds nothing else but may be new: make it owner-only as well
+            crate::state::ensure_private_dir(parent).map_err(|e| e.to_string())?;
         }
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
