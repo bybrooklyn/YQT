@@ -253,6 +253,10 @@ impl qobject::Player {
         queuemodel::publish(change, move || items);
         let rev = self.queue.wrapping_add(1);
         self.as_mut().set_queue(rev);
+        // The queue changed, so the track the engine was pre-decoding may no longer be the next one ("Play next",
+        // a move, a removal). Clearing it makes the engine switch normally, to the right track, instead of gaplessly
+        // into the old one.
+        self.as_mut().set_next_source(QString::default());
     }
 
     /// Keep the `index` property equal to the queue's playing row.
@@ -275,6 +279,9 @@ impl qobject::Player {
     /// Tell the smart-download rules what is coming up in the queue and what was played recently.
     /// They only act when `downloads.smart_enabled` is on; this just keeps their inputs current.
     fn feed_smart_downloads(&self, i: usize) {
+        // Always (smart downloads on or off): the playing song and the next two must not be evicted from disk.
+        let in_use = (i..i + 3).filter_map(|j| self.rust().state.get(j)).map(|v| s(v, "videoId")).filter(|id| !id.is_empty()).collect();
+        crate::downloads::manager::set_playing(in_use);
         let cfg = crate::config::current();
         if !cfg.downloads.smart_enabled {
             return;
@@ -360,6 +367,13 @@ impl qobject::Player {
             };
             let _ = th.queue(move |mut p| {
                 p.as_mut().st_mut().radio_busy = false;
+                // The user may have started something else while this was loading: the radio of the old song must not
+                // be appended to the new queue. Drop it, and fetch the radio for what is playing now.
+                let still_ours = p.rust().state.items().last().is_some_and(|l| s(l, "videoId") == seed);
+                if !still_ours {
+                    p.as_mut().fetch_radio(false);
+                    return;
+                }
                 let have: Vec<String> = p.rust().state.items().iter().map(|i| s(i, "videoId")).collect();
                 let new: Vec<Value> = items.into_iter().filter(|i| !have.contains(&s(i, "videoId"))).collect();
                 if !new.is_empty() {
@@ -404,11 +418,12 @@ impl qobject::Player {
         if songs.is_empty() {
             return;
         }
+        let first_new = self.rust().state.len();
         let change = self.as_mut().st_mut().state.extend(songs);
         self.as_mut().publish(change);
         if !*self.has_track() {
-            let last = self.rust().state.len() - 1;
-            self.load(last);
+            // start with the first song that was added, not the last
+            self.load(first_new);
         }
     }
 
@@ -562,7 +577,7 @@ impl qobject::Player {
                     match r {
                         Ok(r) if r.status().as_u16() == 206 => "visionOS client: OK (stream not capped)".to_owned(),
                         Ok(r) => format!("visionOS stream is capped/blocked (HTTP {})", r.status().as_u16()),
-                        Err(e) => format!("Stream check failed: {e}"),
+                        Err(e) => format!("Stream check failed: {}", e.without_url()),
                     }
                 }
             };

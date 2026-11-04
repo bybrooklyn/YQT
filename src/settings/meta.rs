@@ -267,14 +267,16 @@ pub static META: &[Meta] = &[
         .step(0.05)
         .slider(),
     b("lyrics.karaoke", "lyrics", "Karaoke fill", "Fill the current line from left to right between timestamps."),
-    b("lyrics.gap_dots", "lyrics", "Dots in instrumental gaps", "Show animated dots during long instrumental parts."),
+    // Not shown until the interface implements them (a setting that does nothing is worse than none).
+    b("lyrics.gap_dots", "lyrics", "Dots in instrumental gaps", "Show animated dots during long instrumental parts.").hidden(),
     b("lyrics.tint_with_accent", "lyrics", "Tint the current line", "Colour the current line with the cover's accent."),
     n("lyrics.cache_days", "lyrics", "Remember lyrics for", "Keep looked-up lyrics on disk this long. 0 does not cache.").range(0.0, 365.0).unit("days"),
     n("lyrics.min_lines", "lyrics", "Minimum lines", "Lyric records with fewer lines are treated as junk.").range(1.0, 50.0).adv(),
     Meta::new("lyrics.lrclib_url", "endpoints", Url, "LRCLIB address", "Must be https (http only for localhost).").adv(),
     Meta::new("lyrics.netease_url", "endpoints", Url, "NetEase address", "Must be https (http only for localhost).").adv(),
     // ---- appearance ----
-    Meta::new("appearance.theme", "look", Choice, "Theme", "Light or dark colours. The system option follows your desktop.").choices(THEMES),
+    // Hidden: the KDE style follows the desktop's colour scheme and ignores an app-level request; see README "Known gaps".
+    Meta::new("appearance.theme", "look", Choice, "Theme", "Light or dark colours. The system option follows your desktop.").choices(THEMES).hidden(),
     f("appearance.cover_radius_percent", "look", "Cover rounding", "Corner radius of large covers as a percentage of their size.")
         .range(0.0, 50.0)
         .step(1.0)
@@ -282,7 +284,9 @@ pub static META: &[Meta] = &[
         .slider(),
     b("appearance.accent_from_cover", "look", "Colours from the cover", "Tint pages, lyrics and highlights with the current cover's colour."),
     b("appearance.reduce_motion", "look", "Reduce motion", "Turn off decorative animation such as lyric blur and shelf transitions."),
-    Meta::new("appearance.density", "look", Choice, "Density", "Compact fits more on screen.").choices(&[("comfortable", "Comfortable"), ("compact", "Compact")]),
+    Meta::new("appearance.density", "look", Choice, "Density", "Compact fits more on screen.")
+        .choices(&[("comfortable", "Comfortable"), ("compact", "Compact")])
+        .hidden(),
     t("ui.style", "look", "Style override", "Qt Quick Controls style. Empty uses org.kde.desktop (Fusion if it is missing). Examples: Fusion, Material.")
         .restart()
         .adv(),
@@ -291,7 +295,7 @@ pub static META: &[Meta] = &[
     // ---- window ----
     b("window.close_to_tray", "window", "Close to the tray", "Closing the window keeps the music playing from the system tray."),
     b("window.mini_always_on_top", "window", "Mini-player on top", "Keep the mini-player above other windows."),
-    b("window.remember_geometry", "window", "Remember window size and position", "Restore the window as you left it."),
+    b("window.remember_geometry", "window", "Remember window size and position", "Restore the window as you left it.").hidden(),
     b("integration.mpris", "window", "Desktop media controls", "Publish playback to the desktop (MPRIS on Linux) for media keys and widgets.").restart(),
     // ---- shortcuts ----
     k("keys.play_pause", "Play / pause"),

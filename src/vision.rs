@@ -53,7 +53,7 @@ async fn visitor(video_id: &str) -> Result<String, String> {
             return Ok(v.clone());
         }
     }
-    let html = client()
+    let page = client()
         .get("https://www.youtube.com/watch")
         .query(&[("v", video_id), ("bpctr", "9999999999"), ("has_verified", "1")])
         .header("User-Agent", user_agent())
@@ -61,10 +61,8 @@ async fn visitor(video_id: &str) -> Result<String, String> {
         .header("Cookie", "SOCS=CAI")
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .text()
-        .await
         .map_err(|e| e.to_string())?;
+    let html = String::from_utf8_lossy(&crate::state::read_limited(page, crate::state::MAX_PAGE_BODY).await?).into_owned();
     let v = extract_visitor(&html).ok_or("no visitor data on watch page")?;
     *VISITOR.lock().unwrap() = Some((v.clone(), Instant::now()));
     Ok(v)
@@ -190,7 +188,7 @@ async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> 
         "racyCheckOk": true, "contentCheckOk": true,
         "playbackContext": {"contentPlaybackContext": {"html5Preference": "HTML5_PREF_WANTS"}}
     });
-    let resp: Value = client()
+    let reply = client()
         .post("https://www.youtube.com/youtubei/v1/player")
         .query(&[("key", yt.innertube_api_key.as_str()), ("prettyPrint", "false")])
         .header("User-Agent", user_agent())
@@ -202,10 +200,9 @@ async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> 
         .body(body.to_string())
         .send()
         .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
         .map_err(|e| e.to_string())?;
+    let resp: Value =
+        serde_json::from_slice(&crate::state::read_limited(reply, crate::state::MAX_API_BODY).await?).map_err(|e| e.to_string())?;
 
     let status = resp["playabilityStatus"]["status"].as_str().unwrap_or("");
     let formats = resp["streamingData"]["adaptiveFormats"].as_array();
@@ -213,12 +210,24 @@ async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> 
         let why = resp["playabilityStatus"]["reason"].as_str().unwrap_or(status);
         return Err(format!("visionOS: no streams ({why})"));
     };
-    let parsed = parse_formats(formats);
+    let mut parsed = parse_formats(formats);
+    // The player and the downloader will fetch these URLs: only https Google/YouTube media hosts, never a loopback,
+    // LAN or arbitrary host that a hostile or tampered response might name.
+    parsed.retain(|f| is_media_url(&f.url));
     if parsed.is_empty() {
         return Err("visionOS: no audio format with a plain URL".to_owned());
     }
     remember_loudness(video_id, &parsed);
     Ok(parsed)
+}
+
+/// An https URL on a Google/YouTube host, without userinfo: the only kind of stream URL we are willing to fetch.
+pub fn is_media_url(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else { return false };
+    u.scheme() == "https"
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.host_str().is_some_and(crate::security::is_trusted_youtube_host)
 }
 
 /// YouTube sends several numbers as JSON strings ("contentLength": "3405210"); accept both forms.
@@ -293,6 +302,25 @@ mod tests {
         assert_eq!(opus50.loudness_db, Some(-3.5));
         assert_eq!(f.iter().find(|x| x.itag == 140).unwrap().codec, Codec::Aac);
         assert!(parse_formats(&[]).is_empty());
+    }
+
+    #[test]
+    fn only_https_google_media_hosts_are_fetched() {
+        assert!(is_media_url("https://rr3---sn-abc.googlevideo.com/videoplayback?expire=1&sig=x"));
+        assert!(is_media_url("https://www.youtube.com/x"));
+        for bad in [
+            "http://rr3---sn-abc.googlevideo.com/videoplayback",
+            "https://127.0.0.1:8080/videoplayback",
+            "https://169.254.169.254/latest/meta-data",
+            "https://googlevideo.com.evil.example/x",
+            "https://evilgooglevideo.com/x",
+            "https://user:pw@rr3---sn-abc.googlevideo.com/x",
+            "file:///etc/passwd",
+            "opus50",
+            "",
+        ] {
+            assert!(!is_media_url(bad), "{bad}");
+        }
     }
 
     #[test]

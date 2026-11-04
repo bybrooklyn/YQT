@@ -107,8 +107,14 @@ impl Default for SettingsRust {
 /// Serialises read-modify-write cycles of the file.
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
-fn read_text() -> String {
-    std::fs::read_to_string(config::path()).unwrap_or_else(|_| config::Config::template())
+/// The settings file as text. A missing file is a fresh start (the template); any other failure is an error, so a
+/// momentary read problem can never turn into "save the template over the user's settings".
+fn read_text() -> Result<String, String> {
+    match std::fs::read_to_string(config::path()) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(config::Config::template()),
+        Err(e) => Err(format!("Cannot read your settings file, so nothing was changed: {e}")),
+    }
 }
 
 fn write_text(text: &str) -> Result<(), String> {
@@ -181,7 +187,7 @@ impl qobject::Settings {
     fn commit(mut self: Pin<&mut Self>, changed: &[String], edit: impl FnOnce(&str) -> Result<logic::Outcome, String>) -> QString {
         let result = {
             let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            edit(&read_text()).and_then(|out| {
+            read_text().and_then(|text| edit(&text)).and_then(|out| {
                 write_text(&out.text)?;
                 Ok(out.config)
             })

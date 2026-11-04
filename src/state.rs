@@ -165,6 +165,26 @@ pub fn st() -> &'static State {
     })
 }
 
+/// Read a response body, but never more than `max` bytes: a hostile or broken server cannot make us buffer without
+/// bound (the request timeout limits time, this limits memory).
+pub async fn read_limited(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|l| l > max as u64) {
+        return Err("the response was larger than allowed".to_owned());
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.without_url().to_string())? {
+        if buf.len() + chunk.len() > max {
+            return Err("the response was larger than allowed".to_owned());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+/// Upper bounds for bodies we parse: API answers and the watch page.
+pub const MAX_API_BODY: usize = 8 * 1024 * 1024;
+pub const MAX_PAGE_BODY: usize = 8 * 1024 * 1024;
+
 /// Shared HTTP client for the small third-party/API calls (lyrics, likes, playlists).
 pub fn http() -> &'static reqwest::Client {
     static C: OnceLock<reqwest::Client> = OnceLock::new();

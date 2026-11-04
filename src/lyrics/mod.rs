@@ -156,10 +156,12 @@ pub fn providers_from_config(client: &reqwest::Client, cfg: &config::Lyrics, all
 
 /// Ask every provider at once and pick the best answer. A provider that errors, times out or panics only
 /// counts as failed; the result is `Failed` only when *every* provider failed.
+#[cfg(test)]
 pub async fn lookup(providers: Vec<Arc<dyn Provider>>, q: &Query, min_lines: usize, prefer_synced: bool) -> LyricsResult {
     lookup_with_timeout(providers, q, min_lines, prefer_synced, PROVIDER_TIMEOUT).await
 }
 
+#[cfg(test)]
 pub async fn lookup_with_timeout(
     providers: Vec<Arc<dyn Provider>>,
     q: &Query,
@@ -167,6 +169,18 @@ pub async fn lookup_with_timeout(
     prefer_synced: bool,
     limit: Duration,
 ) -> LyricsResult {
+    lookup_detailed(providers, q, min_lines, prefer_synced, limit).await.0
+}
+
+/// Like [`lookup_with_timeout`], plus whether any provider failed on the way. An answer that was reached while a
+/// provider was down may be incomplete (a synced copy could exist there), so callers must not cache it for long.
+pub async fn lookup_detailed(
+    providers: Vec<Arc<dyn Provider>>,
+    q: &Query,
+    min_lines: usize,
+    prefer_synced: bool,
+    limit: Duration,
+) -> (LyricsResult, bool) {
     let total = providers.len();
     let mut set = tokio::task::JoinSet::new();
     for (rank, p) in providers.into_iter().enumerate() {
@@ -194,15 +208,16 @@ pub async fn lookup_with_timeout(
             Err(e) => failures.push(AppError::new(ErrorKind::Internal, "A lyrics service failed unexpectedly.", e.to_string())),
         }
     }
+    let degraded = !failures.is_empty();
     if let Some(p) = rank::pick(cands, q, min_lines, prefer_synced) {
-        return p.into();
+        return (p.into(), degraded);
     }
     if total > 0 && failures.len() >= total {
         // deterministic: the most informative failure (not a timeout/config one) first
         let first = failures.iter().find(|e| e.kind != ErrorKind::Config).unwrap_or(&failures[0]).clone();
-        return LyricsResult::Failed(first);
+        return (LyricsResult::Failed(first), true);
     }
-    LyricsResult::Unavailable
+    (LyricsResult::Unavailable, degraded)
 }
 
 /// Everything the app does for one track: memory cache, disk cache, then the providers.
@@ -221,8 +236,9 @@ pub async fn resolve(client: &reqwest::Client, cfg: &config::Lyrics, allow_insec
             return hit;
         }
     }
-    let result = lookup(providers, q, cfg.min_lines, cfg.prefer_synced).await;
-    if !matches!(result, LyricsResult::Failed(_)) {
+    let (result, degraded) = lookup_detailed(providers, q, cfg.min_lines, cfg.prefer_synced, PROVIDER_TIMEOUT).await;
+    // Cache only a complete answer: while a provider was down, "unavailable" or a weaker copy could be wrong.
+    if !degraded {
         cache::memory().put(&key, result.clone());
         if let Some(dir) = disk {
             cache::store(dir, &key, &result, now);

@@ -88,6 +88,7 @@ Kirigami.Page {
                 Layout.preferredHeight: Layout.preferredWidth
                 source: Player.cover || Player.thumbnail
                 decode: 1200
+                radius: width * AppConfig.coverRadiusPercent / 100   // slightly rounded
             }
 
             Kirigami.Heading {
@@ -130,11 +131,15 @@ Kirigami.Page {
             spacing: Kirigami.Units.smallSpacing
 
             QQC2.TabBar {
+                id: tabs
                 Layout.fillWidth: true
+                // Line up with the list below instead of running over the width its scrollbar takes.
+                Layout.rightMargin: page.tab === "lyrics" ? lyricsList.QQC2.ScrollBar.vertical.width : queueView.QQC2.ScrollBar.vertical.width
                 currentIndex: page.tab === "lyrics" ? 1 : 0
                 onCurrentIndexChanged: page.tab = currentIndex === 1 ? "lyrics" : "queue"
-                QQC2.TabButton { text: qsTr("Up next") }
-                QQC2.TabButton { text: qsTr("Lyrics") }
+                // Two equal halves that fill the width of the list below.
+                QQC2.TabButton { text: qsTr("Up next"); width: tabs.width / 2 }
+                QQC2.TabButton { text: qsTr("Lyrics"); width: tabs.width / 2 }
             }
 
             StackLayout {
@@ -146,45 +151,88 @@ Kirigami.Page {
                 ListView {
                     id: queueView
                     clip: true
-                    model: { try { return JSON.parse(Player.queue) } catch (e) { return [] } }
+                    // The Rust queue model: rows can be moved and removed without the list being rebuilt.
+                    model: QueueModel
                     Component.onCompleted: if (Player.index >= 0) positionViewAtIndex(Player.index, ListView.Center)
                     QQC2.ScrollBar.vertical: QQC2.ScrollBar {}
+                    moveDisplaced: Transition { YAnimator { duration: Kirigami.Units.longDuration; easing.type: Easing.InOutQuad } }
 
-                    delegate: QQC2.ItemDelegate {
-                        id: qrow
+                    // The dragged row must be a child of the delegate, not the delegate itself (Kirigami.ListItemDragHandle).
+                    delegate: Item {
+                        id: slot
                         required property int index
-                        required property var modelData
+                        required property string title
+                        required property string artist
+                        required property string thumbnail
+                        required property string duration
+                        required property string videoId
+                        required property string artistId
+                        required property string albumId
+                        readonly property var song: ({videoId: videoId, title: title, artist: artist, artistId: artistId, albumId: albumId, thumbnail: thumbnail, duration: duration})
                         width: ListView.view.width
-                        highlighted: index === Player.index
-                        onClicked: Player.playIndex(index)
-                        contentItem: RowLayout {
-                            spacing: Kirigami.Units.largeSpacing
-                            CoverImage {
-                                source: qrow.modelData.thumbnail || ""
-                                decode: 160
-                                Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                                Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
+                        height: qrow.implicitHeight
+
+                        QQC2.ItemDelegate {
+                            id: qrow
+                            width: slot.width
+                            highlighted: slot.index === Player.index
+                            onClicked: Player.playIndex(slot.index)
+                            contentItem: RowLayout {
+                                spacing: Kirigami.Units.largeSpacing
+                                Kirigami.ListItemDragHandle {
+                                    listItem: qrow
+                                    listView: queueView
+                                    onMoveRequested: (oldIndex, newIndex) => QueueModel.moveRow(oldIndex, newIndex)
+                                }
+                                CoverImage {
+                                    source: slot.thumbnail
+                                    decode: 160
+                                    Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
+                                    Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
+                                }
+                                ColumnLayout {
+                                    spacing: 0
+                                    Layout.fillWidth: true
+                                    QQC2.Label { text: slot.title; elide: Text.ElideRight; Layout.fillWidth: true; color: qrow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor }
+                                    QQC2.Label { text: slot.artist; elide: Text.ElideRight; Layout.fillWidth: true; opacity: 0.7; font: Kirigami.Theme.smallFont }
+                                }
+                                QQC2.Label { text: slot.duration; opacity: 0.7 }
+                                QQC2.ToolButton {
+                                    icon.name: "overflow-menu"; display: QQC2.AbstractButton.IconOnly; text: qsTr("More")
+                                    onClicked: rowMenu.popup()
+                                }
                             }
-                            ColumnLayout {
-                                spacing: 0
-                                Layout.fillWidth: true
-                                QQC2.Label { text: qrow.modelData.title || ""; elide: Text.ElideRight; Layout.fillWidth: true; color: qrow.highlighted ? Kirigami.Theme.highlightedTextColor : Kirigami.Theme.textColor }
-                                QQC2.Label { text: qrow.modelData.artist || ""; elide: Text.ElideRight; Layout.fillWidth: true; opacity: 0.7; font: Kirigami.Theme.smallFont }
-                            }
-                            QQC2.Label { text: qrow.modelData.duration || ""; opacity: 0.7 }
-                            QQC2.ToolButton {
-                                icon.name: "go-up"; display: QQC2.AbstractButton.IconOnly; text: qsTr("Move up")
-                                enabled: qrow.index > 0
-                                onClicked: Player.moveItem(qrow.index, qrow.index - 1)
-                            }
-                            QQC2.ToolButton {
-                                icon.name: "go-down"; display: QQC2.AbstractButton.IconOnly; text: qsTr("Move down")
-                                enabled: qrow.index < queueView.count - 1
-                                onClicked: Player.moveItem(qrow.index, qrow.index + 1)
-                            }
-                            QQC2.ToolButton {
-                                icon.name: "list-remove"; display: QQC2.AbstractButton.IconOnly; text: qsTr("Remove")
-                                onClicked: Player.removeAt(qrow.index)
+                            // Right-click opens the same menu as the ⋮ button.
+                            TapHandler { acceptedButtons: Qt.RightButton; onTapped: rowMenu.popup() }
+
+                            QQC2.Menu {
+                                id: rowMenu
+                                property string dl: "none"
+                                onAboutToShow: dl = Downloads.state(slot.videoId)
+                                QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: Player.playIndex(slot.index) }
+                                QQC2.MenuItem {
+                                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+                                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+                                    onTriggered: {
+                                        if (rowMenu.dl === "failed") Downloads.retry(slot.videoId)
+                                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(slot.song))
+                                        else Downloads.remove(slot.videoId)
+                                    }
+                                }
+                                QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: slot.index !== Player.index; onTriggered: QueueModel.playRowNext(slot.index) }
+                                QQC2.MenuSeparator {}
+                                QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: slot.artistId.length > 0; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: slot.artistId, title: slot.artist}) }
+                                QQC2.MenuItem { icon.name: "media-optical-audio"; text: qsTr("Go to album"); visible: slot.albumId.length > 0; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "album", browseId: slot.albumId, title: slot.title}) }
+                                QQC2.MenuItem {
+                                    readonly property bool liked: { Backend.likedRev; return Backend.isLiked(slot.videoId) }
+                                    visible: Backend.loggedIn; height: visible ? implicitHeight : 0
+                                    icon.name: liked ? "starred-symbolic" : "non-starred-symbolic"
+                                    text: liked ? qsTr("Remove from liked music") : qsTr("Like")
+                                    onTriggered: Backend.setLiked(slot.videoId, !liked)
+                                }
+                                QQC2.MenuItem { icon.name: "list-add"; text: qsTr("Add to playlist…"); visible: Backend.loggedIn; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().addToPlaylist({videoId: slot.videoId, title: slot.title}) }
+                                QQC2.MenuSeparator {}
+                                QQC2.MenuItem { icon.name: "list-remove"; text: qsTr("Remove from queue"); onTriggered: QueueModel.removeRow(slot.index) }
                             }
                         }
                     }
@@ -201,12 +249,18 @@ Kirigami.Page {
                 Item {
                     id: lyricsPane
 
+                    // The cover's dominant colour (computed in Rust); the theme highlight until it is ready.
+                    Accent { id: accent; source: Player.cover || Player.thumbnail }
+                    readonly property color tint: accent.ready && AppConfig.accentFromCover ? accent.color : Kirigami.Theme.highlightColor
+                    // Shown only as the very last line, set like a lyric.
+                    readonly property string creditText: page.lyricsSource.length > 0 ? qsTr("Lyrics from %1").arg(page.lyricsSource) : ""
+
                     // The line being sung. `rawLine` follows the player position exactly; `line` is what is shown.
                     // Moving forward is applied at once. Moving *backward* only counts once the position has stayed
                     // there for a moment, because the position can glitch backwards for an instant (stream range
                     // requests, buffering) – which used to make the highlight flash off and on again.
                     readonly property int rawLine: {
-                        const p = page.media.position + AppConfig.lyricsLeadMs
+                        const p = applicationWindow().smoothPosition + AppConfig.lyricsLeadMs
                         const s = page.synced
                         let lo = 0, hi = s.length - 1, r = -1
                         while (lo <= hi) {
@@ -227,15 +281,25 @@ Kirigami.Page {
                     ListView {
                         id: lyricsList
                         anchors.fill: parent
-                        anchors.bottomMargin: credit.visible ? credit.height + Kirigami.Units.smallSpacing : 0   // end above the credit
                         visible: page.synced.length > 0
                         clip: true
                         model: page.synced
                         bottomMargin: height / 2
                         topMargin: height / 3
                         QQC2.ScrollBar.vertical: QQC2.ScrollBar {}
+                        // The source, as a quiet last line under the final lyric.
+                        footer: QQC2.Label {
+                            width: ListView.view.width
+                            visible: lyricsPane.creditText.length > 0
+                            height: visible ? Kirigami.Units.gridUnit * 4 : 0
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            text: lyricsPane.creditText
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
+                            opacity: 0.3
+                        }
 
-                        NumberAnimation { id: scrollAnim; target: lyricsList; property: "contentY"; duration: 350; easing.type: Easing.OutCubic }
+                        NumberAnimation { id: scrollAnim; target: lyricsList; property: "contentY"; duration: AppConfig.reduceMotion ? 0 : 350; easing.type: Easing.OutCubic }
                         function follow() {
                             const cur = lyricsPane.line
                             if (cur < 0 || dragging || flicking) return
@@ -256,10 +320,18 @@ Kirigami.Page {
                             required property var modelData
                             readonly property bool active: index === lyricsPane.line
                             property real glow: active ? 1 : 0
-                            Behavior on glow { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                            Behavior on glow { enabled: !AppConfig.reduceMotion; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
 
                             width: ListView.view.width
-                            implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing
+                            implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing * 1.5
+
+                            // How far through its own line the song is (0..1): the karaoke fill.
+                            readonly property real progress: {
+                                if (!active) return 0
+                                const t0 = modelData[0]
+                                const next = lineItem.index + 1 < page.synced.length ? page.synced[lineItem.index + 1][0] : t0 + 4000
+                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / Math.max(1, next - t0)))
+                            }
 
                             QQC2.Label {
                                 id: label
@@ -268,14 +340,39 @@ Kirigami.Page {
                                 text: lineItem.modelData[1] || "♪"
                                 wrapMode: Text.Wrap
                                 horizontalAlignment: Text.AlignHCenter
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
-                                opacity: 0.4 + 0.6 * lineItem.glow
-                                scale: 1 + 0.12 * lineItem.glow
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.9 * AppConfig.lyricsSizeScale
+                                font.bold: true
+                                opacity: 0.35 + 0.65 * lineItem.glow
+                                scale: 1 + 0.1 * lineItem.glow
                                 transformOrigin: Item.Center
+                                // The line being sung takes the cover's colour.
+                                color: lineItem.active && AppConfig.lyricsTint ? lyricsPane.tint : Kirigami.Theme.textColor
+
+                                // Karaoke: the same text in the highlight colour, revealed left to right as the line is sung.
+                                // Only for a single-line lyric (a wrapped one just keeps the tint).
+                                Item {
+                                    visible: AppConfig.lyricsKaraoke && lineItem.active && label.lineCount === 1
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: (label.width - label.contentWidth) / 2
+                                    width: label.contentWidth * lineItem.progress
+                                    height: label.height
+                                    clip: true
+                                    QQC2.Label {
+                                        x: 0
+                                        width: label.width
+                                        height: label.height
+                                        // keep the text where the base label draws it: offset back by the clip's own x
+                                        leftPadding: 0
+                                        text: label.text
+                                        font: label.font
+                                        horizontalAlignment: Text.AlignLeft
+                                        color: Kirigami.Theme.highlightColor
+                                    }
+                                }
                             }
                             TapHandler {
                                 onTapped: {
-                                    page.media.position = lineItem.modelData[0]
+                                    applicationWindow().seek(lineItem.modelData[0])
                                     backTimer.stop()
                                     lyricsPane.line = lineItem.index   // follow an explicit seek immediately
                                 }
@@ -286,7 +383,6 @@ Kirigami.Page {
                     QQC2.ScrollView {
                         id: plainView
                         anchors.fill: parent
-                        anchors.bottomMargin: credit.visible ? credit.height + Kirigami.Units.smallSpacing : 0
                         visible: page.synced.length === 0 && page.plain.length > 0
                         // Wrap to the pane: without this the label is as wide as its longest line, which clipped
                         // text on the right and added a horizontal scrollbar.
@@ -294,21 +390,13 @@ Kirigami.Page {
                         QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
                         QQC2.Label {
                             width: plainView.availableWidth
-                            text: page.plain
+                            // the credit follows the text as its last line
+                            text: page.plain + (lyricsPane.creditText.length > 0 ? "\n\n" + lyricsPane.creditText : "")
                             wrapMode: Text.Wrap
                             horizontalAlignment: Text.AlignHCenter
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3 * AppConfig.lyricsSizeScale
                             padding: Kirigami.Units.largeSpacing
                         }
-                    }
-
-                    QQC2.Label {
-                        id: credit
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-                        visible: page.lyricsSource.length > 0
-                        text: page.lyricsSource === "LRCLIB" ? qsTr("Synced lyrics: LRCLIB") : page.lyricsSource
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.5
                     }
 
                     Kirigami.PlaceholderMessage {
@@ -316,7 +404,7 @@ Kirigami.Page {
                         width: parent.width - Kirigami.Units.gridUnit * 4
                         visible: !page.lyricsBusy && page.synced.length === 0 && page.plain.length === 0
                         icon.name: "view-media-lyrics"
-                        text: page.lyricsError || qsTr("No lyrics available")
+                        text: page.lyricsError || qsTr("Lyrics unavailable")
                     }
                     QQC2.BusyIndicator { anchors.centerIn: parent; running: page.lyricsBusy; visible: running }
                 }

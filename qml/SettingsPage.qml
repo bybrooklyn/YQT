@@ -13,6 +13,199 @@ Kirigami.ScrollablePage {
     property bool busy: false
     property int loginId: -1
     readonly property var browsers: { try { return JSON.parse(Backend.browsers()) } catch (e) { return [] } }
+    property bool showAdvanced: false
+
+    function formatBytes(b) {
+        if (b === undefined || b === null || isNaN(b)) return ""
+        const u = ["B", "kB", "MB", "GB", "TB"]
+        let i = 0
+        while (b >= 1000 && i < u.length - 1) { b /= 1000; ++i }
+        return (i === 0 ? String(Math.round(b)) : b.toFixed(1)) + " " + u[i]
+    }
+
+    Kirigami.PromptDialog {
+        id: resetDialog
+        title: qsTr("Reset all settings?")
+        subtitle: qsTr("Every setting goes back to its default. Your account and downloads are not touched.")
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        onAccepted: AppSettings.resetAll()
+    }
+
+    // One setting as a standard control, built from what the backend says about it (label, help, type, range,
+    // choices; see `AppSettings.describe`). Every change is validated and saved by Rust and applies at once.
+    component SettingField: ColumnLayout {
+        id: field
+        required property string path
+        readonly property var meta: { try { return JSON.parse(AppSettings.describe(path)) } catch (e) { return ({}) } }
+        readonly property int rev: AppSettings.revision
+        readonly property var value: rev < 0 ? undefined : AppSettings.get(path)
+        property string error: ""
+        readonly property string kind: meta.kind || ""
+        // an optional switch that must be on before this setting does anything
+        property string gate: ""
+        readonly property bool gateOn: gate === "" || (rev >= 0 && AppSettings.get(gate) === true)
+
+        visible: !!meta.path && !meta.hidden && (!meta.advanced || page.showAdvanced)
+        spacing: Kirigami.Units.smallSpacing
+        Kirigami.FormData.label: kind === "bool" ? "" : (meta.label || "") + ":"
+        Kirigami.FormData.buddyFor: kind === "bool" ? sw : null
+
+        function commit(v) { error = AppSettings.set(path, v) }
+
+        QQC2.Switch {
+            id: sw
+            visible: field.kind === "bool"
+            text: field.meta.label || ""
+            enabled: field.gateOn
+            checked: field.value === true
+            onToggled: field.commit(checked)
+        }
+        QQC2.SpinBox {
+            id: intBox
+            visible: field.kind === "int"
+            enabled: field.gateOn
+            editable: true
+            from: field.meta.min === null || field.meta.min === undefined ? 0 : field.meta.min
+            to: field.meta.max === null || field.meta.max === undefined ? 1000000 : field.meta.max
+            stepSize: Math.max(1, field.meta.step || 1)
+            value: Number(field.value || 0)
+            textFromValue: (v) => field.meta.unit ? v + " " + field.meta.unit : String(v)
+            valueFromText: (t) => parseInt(t)
+            onValueModified: field.commit(value)
+        }
+        // A decimal number: a SpinBox counts whole steps, so scale it.
+        QQC2.SpinBox {
+            id: floatBox
+            readonly property real scale: 100
+            visible: field.kind === "float"
+            enabled: field.gateOn
+            editable: true
+            from: (field.meta.min === null || field.meta.min === undefined ? 0 : field.meta.min) * scale
+            to: (field.meta.max === null || field.meta.max === undefined ? 100000 : field.meta.max) * scale
+            stepSize: Math.max(1, (field.meta.step || 0.1) * scale)
+            value: Math.round(Number(field.value || 0) * scale)
+            textFromValue: (v) => (v / scale).toFixed(2).replace(/\.?0+$/, "") + (field.meta.unit ? " " + field.meta.unit : "")
+            valueFromText: (t) => Math.round(parseFloat(t) * scale)
+            onValueModified: field.commit(value / scale)
+        }
+        QQC2.ComboBox {
+            visible: field.kind === "choice"
+            enabled: field.gateOn
+            model: field.meta.choices || []
+            textRole: "label"
+            valueRole: "value"
+            // re-evaluated once the model is in (count), and whenever the setting changes
+            currentIndex: count >= 0 ? indexOfValue(field.value) : -1
+            onActivated: field.commit(currentValue)
+        }
+        QQC2.TextField {
+            visible: field.kind === "text" || field.kind === "url" || field.kind === "dir" || field.kind === "shortcut"
+            enabled: field.gateOn
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+            placeholderText: field.kind === "dir" ? qsTr("Default location") : ""
+            text: field.value === undefined || field.value === null ? "" : String(field.value)
+            onEditingFinished: if (text !== String(field.value)) field.commit(text)
+        }
+        // A list of choices, each switched on or off (lyric providers).
+        Repeater {
+            model: field.kind === "textlist" ? (field.meta.choices || []) : []
+            QQC2.CheckBox {
+                required property var modelData
+                text: modelData.label
+                enabled: field.gateOn
+                checked: (field.value || []).indexOf(modelData.value) >= 0
+                onToggled: {
+                    const cur = (field.value || []).filter(v => v !== modelData.value)
+                    field.commit(checked ? cur.concat([modelData.value]) : cur)
+                }
+            }
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 28
+            visible: text.length > 0
+            text: field.meta.description || ""
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            font: Kirigami.Theme.smallFont
+        }
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 28
+            visible: field.meta.restart === true && AppSettings.needsRestart(field.path)
+            text: qsTr("Takes effect after restarting the app.")
+            wrapMode: Text.Wrap
+            color: Kirigami.Theme.neutralTextColor
+            font: Kirigami.Theme.smallFont
+        }
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 28
+            visible: field.error.length > 0
+            text: field.error
+            wrapMode: Text.Wrap
+            color: Kirigami.Theme.negativeTextColor
+            font: Kirigami.Theme.smallFont
+        }
+    }
+
+    // The ten-band equalizer: on/off, preset, preamp and one vertical slider per band (31 Hz to 16 kHz).
+    component EqualizerField: ColumnLayout {
+        id: eq
+        readonly property var freqs: Equalizer.bandFrequencies()
+        readonly property bool engineOn: AppConfig.audioEngine === "rust"
+        spacing: Kirigami.Units.smallSpacing
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 28
+            visible: !eq.engineOn
+            wrapMode: Text.Wrap
+            color: Kirigami.Theme.neutralTextColor
+            text: qsTr("The equalizer works with the built-in audio engine. Choose it under “Audio engine” above (then restart).")
+        }
+        RowLayout {
+            QQC2.Switch { text: qsTr("Equalizer"); checked: Equalizer.enabled; onToggled: { Equalizer.setEnabled(checked); Equalizer.persist() } }
+            QQC2.ComboBox {
+                id: presets
+                model: Equalizer.presetNames()
+                currentIndex: Math.max(0, find(Equalizer.preset))
+                onActivated: { Equalizer.applyPreset(currentText); Equalizer.persist() }
+            }
+        }
+        RowLayout {
+            spacing: Kirigami.Units.smallSpacing
+            Repeater {
+                model: eq.freqs.length
+                ColumnLayout {
+                    required property int index
+                    spacing: 0
+                    QQC2.Label { Layout.alignment: Qt.AlignHCenter; text: (Equalizer.bandsDb[index] > 0 ? "+" : "") + Number(Equalizer.bandsDb[index]).toFixed(0); font: Kirigami.Theme.smallFont; opacity: 0.7 }
+                    QQC2.Slider {
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredHeight: Kirigami.Units.gridUnit * 8
+                        orientation: Qt.Vertical
+                        from: -12; to: 12; stepSize: 0.5
+                        value: Equalizer.bandsDb[index]
+                        onMoved: Equalizer.setBandDb(index, value)
+                        onPressedChanged: if (!pressed) Equalizer.persist()
+                    }
+                    QQC2.Label {
+                        Layout.alignment: Qt.AlignHCenter
+                        text: eq.freqs[index] >= 1000 ? (eq.freqs[index] / 1000) + "k" : eq.freqs[index]
+                        font: Kirigami.Theme.smallFont; opacity: 0.7
+                    }
+                }
+            }
+        }
+        RowLayout {
+            QQC2.Label { text: qsTr("Preamp") }
+            QQC2.Slider {
+                from: -12; to: 12; stepSize: 0.5
+                value: Equalizer.preampDb
+                onMoved: Equalizer.setPreampDb(value)
+                onPressedChanged: if (!pressed) Equalizer.persist()
+            }
+            QQC2.Label { text: Number(Equalizer.preampDb).toFixed(1) + " dB" }
+        }
+    }
 
     Connections {
         target: Backend
@@ -138,6 +331,8 @@ Kirigami.ScrollablePage {
             // ---- playback ---------------------------------------------------------------------
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Playback") }
 
+            Repeater { model: AppSettings.paths("audio"); delegate: SettingField { required property string modelData; path: modelData } }
+
             ColumnLayout {
                 Kirigami.FormData.label: qsTr("Stream source:")
                 spacing: Kirigami.Units.smallSpacing
@@ -153,12 +348,79 @@ Kirigami.ScrollablePage {
                 }
             }
 
+            // ---- equalizer --------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Equalizer") }
+            EqualizerField {}
+
+            // ---- downloads --------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Downloads") }
+            ColumnLayout {
+                Kirigami.FormData.label: qsTr("Storage:")
+                spacing: Kirigami.Units.smallSpacing
+                QQC2.ProgressBar {
+                    Layout.preferredWidth: Kirigami.Units.gridUnit * 20
+                    from: 0
+                    to: Math.max(1, Downloads.capBytes)
+                    value: Math.min(Downloads.usedBytes, Downloads.capBytes)
+                }
+                QQC2.Label {
+                    font: Kirigami.Theme.smallFont
+                    opacity: 0.7
+                    text: qsTr("%1 used of %2").arg(page.formatBytes(Downloads.usedBytes)).arg(page.formatBytes(Downloads.capBytes))
+                }
+                QQC2.Button {
+                    text: qsTr("Show downloads")
+                    icon.name: "folder-download"
+                    onClicked: applicationWindow().go("downloads")
+                }
+            }
+            Repeater { model: AppSettings.paths("downloads"); delegate: SettingField { required property string modelData; path: modelData } }
+            Repeater { model: AppSettings.paths("smart"); delegate: SettingField {
+                required property string modelData
+                path: modelData
+                // only the "what to keep" rules need smart downloads switched on; the pause rules apply to every download
+                gate: ["downloads.keep_liked", "downloads.recent_n", "downloads.queue_ahead_n", "downloads.remove_unplayed_days"].indexOf(modelData) >= 0 ? "downloads.smart_enabled" : ""
+            } }
+
+            // ---- lyrics -----------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Lyrics") }
+            Repeater { model: AppSettings.paths("lyrics"); delegate: SettingField { required property string modelData; path: modelData } }
+
+            // ---- appearance and window --------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Appearance") }
+            Repeater { model: AppSettings.paths("look"); delegate: SettingField { required property string modelData; path: modelData } }
+            Repeater { model: AppSettings.paths("window"); delegate: SettingField { required property string modelData; path: modelData } }
+
+            // ---- shortcuts --------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Keyboard shortcuts") }
+            Repeater { model: AppSettings.paths("keys"); delegate: SettingField { required property string modelData; path: modelData } }
+
+            // ---- privacy ----------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Privacy") }
+            Repeater { model: AppSettings.paths("reporting"); delegate: SettingField { required property string modelData; path: modelData } }
+
+            // ---- advanced ---------------------------------------------------------------------
+            Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("Advanced") }
+            QQC2.CheckBox { text: qsTr("Show advanced settings"); checked: page.showAdvanced; onToggled: page.showAdvanced = checked }
+            Repeater { model: page.showAdvanced ? AppSettings.paths("endpoints") : []; delegate: SettingField { required property string modelData; path: modelData } }
+            RowLayout {
+                QQC2.Button { text: qsTr("Open config folder"); icon.name: "folder-open"; onClicked: Qt.openUrlExternally(AppSettings.configFolderUrl()) }
+                QQC2.Button { text: qsTr("Reset all settings"); icon.name: "edit-reset"; onClicked: resetDialog.open() }
+            }
+            QQC2.Label {
+                Layout.maximumWidth: Kirigami.Units.gridUnit * 28
+                wrapMode: Text.Wrap
+                opacity: 0.7
+                font: Kirigami.Theme.smallFont
+                text: qsTr("Settings are saved to %1 and apply right away.").arg(AppSettings.configPath)
+            }
+
             // ---- about ------------------------------------------------------------------------
             Kirigami.Separator { Kirigami.FormData.isSection: true; Kirigami.FormData.label: qsTr("About") }
             QQC2.Label {
                 Layout.maximumWidth: Kirigami.Units.gridUnit * 28
                 wrapMode: Text.Wrap
-                text: qsTr("Free software under the GNU GPL v3. Lyrics sync via LRCLIB.")
+                text: qsTr("Free software under the GNU GPL v3. Lyrics from LRCLIB, NetEase and YouTube Music.")
             }
         }
     }

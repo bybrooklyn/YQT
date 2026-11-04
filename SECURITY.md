@@ -34,13 +34,25 @@ profile anyway), a compromised OS, physical access.
 | S-04 | Medium | RustyPipe failure reports hold full response bodies (library/liked data), 0644 in a 0755 dir, never pruned | Fixed: dir 0700, pruned at startup by `security.report_retention_days` (default 7) and capped at 50 files; `0` deletes them and disables reporting |
 | S-05 | Medium | Logs could leak cookies, tokens, signed stream URLs | Fixed: all log output passes `logging::redact` (cookies, Authorization/Bearer/SAPISIDHASH, SID-style cookie names, `sig`/`lsig`/`pot`/`n`/`key`/token params, visitor data, long tokens, proxy token); panic hook is redacted; logs 0600 in a 0700 dir, 7 daily files |
 | S-06 | Low | Proxy: unbounded `Range` arithmetic could overflow/underflow; slow-loris on request head; hostile upstream `Content-Type` echoed into headers | Fixed: saturating math + 416, 10 s head timeout + 431 on >16 KiB, control-char content types replaced |
-| S-07 | Medium | Configurable endpoint URLs (lyrics) could be `http://`, carry userinfo, or contain control chars | Mitigated: `security::validate_endpoint` written and tested; each consumer (lyrics, W3) must call it |
+| S-07 | Medium | Configurable endpoint URLs (lyrics) could be `http://`, carry userinfo, or contain control chars | Fixed: `security::validate_endpoint` is called by the lyrics providers and the Settings page |
 | S-08 | Low | QML `Qt.openUrlExternally` with arbitrary schemes (`file:`, custom handlers) | Mitigated: `security::is_safe_external_link` (https only); QML callers must use it |
 | S-09 | Low | Pasted cookie text: a lone `\r` survives `auth::parse_input`'s line joining | Mitigated: the `http` crate refuses CR/LF/NUL in header values, so the request fails instead of injecting; `security::sanitize_header_value` is provided so `parse_input` can reject it up front (W8) |
 | S-10 | Low | `ytapi::post` and other `resp.json()` calls read untrusted bodies without a size cap | Residual: owned by other modules; recommended cap in the W7 report |
 | S-11 | Info | `unsafe` blocks: cxx-qt `get_unchecked_mut` (Qt thread only) and Windows DPAPI | Reviewed; the DPAPI block has a SAFETY comment; comments for the cxx-qt ones are listed for the owners |
 | S-12 | Info | Dependency advisories: `zbus_names`, `zvariant`, `zvariant_derive` unmaintained (RUSTSEC-2026-0370/0371/0372) | Residual: merged into zbus 6; needs the zbus 5 to 6 major upgrade; recorded as `ignore` with a reason |
-| S-13 | Medium | OpenSSL (`native-tls`) in the TLS stack | Residual until W8 switches to rustls; ban is prepared (commented out) in `deny.toml` |
+| S-13 | Medium | OpenSSL (`native-tls`) in the TLS stack | Fixed: reqwest and RustyPipe use rustls with bundled roots; OpenSSL and native-tls are banned in `deny.toml` |
+| S-14 | Medium | `youtube.music_origin` in `config.toml` could point anywhere, and the session cookie, SAPISIDHASH and Origin are sent to it | Fixed: `ytapi::trusted_origin` refuses anything that is not an https YouTube/Google host; tested |
+| S-15 | Low | The proxy re-requested the same range forever on an empty upstream answer, and could relay more than its declared length | Fixed: a pass with no progress ends the response; bytes are capped at the declared range |
+| S-16 | Low | The panic hook handed the raw payload to the default hook, bypassing log redaction | Fixed: the hook prints only the redacted note |
+| S-17 | Low | The stale-file sweep removed any `*.part` in the downloads folder (e.g. a browser's) | Fixed: only this app's `<id>.<ext>.part` names |
+| S-18 | Low | A stream-check error embedded the signed stream URL in the Settings UI | Fixed: `without_url()` |
+
+| S-19 | Low | Stream URLs from a YouTube response were fetched without checking the host | Fixed: only https Google/YouTube media hosts (`vision::is_media_url`); tested, and checked live against public videos |
+| S-20 | Low | Cover downloads followed redirects to any host (the https check ran after the request) | Fixed: a dedicated client whose redirect policy applies the same rule to every hop |
+| S-21 | Low | API and watch-page bodies were read without a size cap | Fixed: `state::read_limited` (8 MiB) |
+| S-22 | Low | A failed read of `config.toml` followed by a Settings change could save the template over the user's settings | Fixed: only a missing file falls back to the template; any other read error aborts the change |
+
+Known and not yet fixed (found by the code audit, all low): `serve_file` has a symlink check-then-open race when the downloads folder is a shared, writable one; MPRIS `SetPosition` ignores the track id; two simultaneous cookie imports share one temporary folder; the data/config directory falls back to `.` when the system gives none (a hostile working directory would then receive secrets); the proxy has no cap on concurrent connections and its URL registry is never pruned.
 
 ## What changed (summary)
 

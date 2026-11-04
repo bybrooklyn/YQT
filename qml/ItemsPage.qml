@@ -26,6 +26,23 @@ Kirigami.ScrollablePage {
     property string heading
     property string subheading
     property string headThumb
+    // the rich parts of an album / artist / playlist page (see `with_page_data` in src/backend.rs)
+    property var hero: null          // {description, wikipediaUrl, stats[{text}], ...}
+    property var shelves: []         // [{title, style, items[]}]: albums, singles, similar artists, ...
+    property var radio: null         // an artist's radio playlist
+    // Home and Explore show each of their sections as a horizontal shelf of cards instead of one long list.
+    readonly property bool shelfMode: query.length === 0 && (target === "home" || target === "explore")
+    readonly property var homeShelves: {
+        if (!shelfMode) return []
+        const out = [], at = {}
+        for (const it of items) {
+            const k = it.section || ""
+            if (!(k in at)) { at[k] = out.length; out.push({title: k, items: []}) }
+            out[at[k]].items.push(it)
+        }
+        return out
+    }
+    readonly property var allShelves: shelfMode ? homeShelves : shelves
     property string errorText        // headline, shown large
     property string errorDetail      // technical detail, shown small
     property bool busy: false
@@ -76,10 +93,13 @@ Kirigami.ScrollablePage {
         heading = res.title || ""
         subheading = res.subtitle || ""
         headThumb = res.thumbnail || ""
+        hero = res.hero || null
+        shelves = res.shelves || []
+        radio = res.radio || null
         pagerId = res.pager || 0
         hasMore = !!res.more
         model.clear()
-        for (const i of res.items || []) model.append(i)
+        if (!shelfMode) for (const i of res.items || []) model.append(i)
         items = res.items || []
     }
 
@@ -87,11 +107,19 @@ Kirigami.ScrollablePage {
         const all = []
         for (const k of Object.keys(slots).map(Number).sort((a, b) => a - b)) for (const i of slots[k]) all.push(i)
         model.clear()
-        for (const i of all) model.append(i)
+        if (!shelfMode) for (const i of all) model.append(i)
         items = all
     }
+    // Opening a card in a shelf (the list rows use `activate(i)` by index instead).
+    function activateItem(item) {
+        if (item.kind === "song") Player.playSong(JSON.stringify(item))
+        else applicationWindow().open(item)
+    }
+
+    property bool pinTop: true
 
     function load(force) {
+        pinTop = true
         clearError()
         pagerId = 0; hasMore = false; loadingMore = false; feedQueue = false
         if (needsLogin && !Backend.loggedIn) {
@@ -151,11 +179,11 @@ Kirigami.ScrollablePage {
                 page.busy = false
                 if (err) {
                     // keep what is on screen (cached or partial); only show the error if there is nothing
-                    if (model.count === 0) page.setError(err)
+                    if (page.items.length === 0) page.setError(err)
                     return
                 }
                 const res = page.parse(json)
-                if (!res) { if (model.count === 0) page.setError(qsTr("Got an unreadable answer from the app.")); return }
+                if (!res) { if (page.items.length === 0) page.setError(qsTr("Got an unreadable answer from the app.")); return }
                 if (page.progressive) {
                     page.cachePut({slots: Object.assign({}, page.slots)})
                     return
@@ -206,6 +234,69 @@ Kirigami.ScrollablePage {
     onFilterChanged: if (query || target === "library") load()
 
     ListModel { id: model }
+
+    // One shelf: a heading and a horizontal row of cards (round for artists).
+    component ShelfRow: ColumnLayout {
+        id: shelf
+        required property var modelData
+        Layout.fillWidth: true
+        spacing: 0
+        Kirigami.Heading {
+            text: shelf.modelData.title
+            level: 3
+            visible: text.length > 0
+            Layout.leftMargin: Kirigami.Units.largeSpacing
+            Layout.topMargin: Kirigami.Units.smallSpacing
+        }
+        ListView {
+            Layout.fillWidth: true
+            Layout.preferredHeight: Kirigami.Units.gridUnit * 12.5
+            orientation: ListView.Horizontal
+            clip: true
+            spacing: Kirigami.Units.smallSpacing
+            leftMargin: Kirigami.Units.smallSpacing
+            rightMargin: Kirigami.Units.smallSpacing
+            model: shelf.modelData.items
+            QQC2.ScrollBar.horizontal: QQC2.ScrollBar {}
+            delegate: QQC2.ItemDelegate {
+                id: card
+                required property var modelData
+                readonly property bool round: modelData.kind === "artist"
+                width: Kirigami.Units.gridUnit * 9
+                height: ListView.view.height - Kirigami.Units.largeSpacing
+                onClicked: page.activateItem(modelData)
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.smallSpacing
+                    CoverImage {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: width
+                        source: card.modelData.thumbnail || ""
+                        decode: 400
+                        radius: card.round ? width / 2 : Kirigami.Units.smallSpacing
+                    }
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        text: card.modelData.title || ""
+                        wrapMode: Text.Wrap
+                        maximumLineCount: 2
+                        elide: Text.ElideRight
+                        horizontalAlignment: card.round ? Text.AlignHCenter : Text.AlignLeft
+                        color: Kirigami.Theme.textColor
+                    }
+                    QQC2.Label {
+                        Layout.fillWidth: true
+                        visible: text.length > 0
+                        text: card.modelData.subtitle || ""
+                        elide: Text.ElideRight
+                        horizontalAlignment: card.round ? Text.AlignHCenter : Text.AlignLeft
+                        font: Kirigami.Theme.smallFont
+                        opacity: 0.7
+                    }
+                    Item { Layout.fillHeight: true }
+                }
+            }
+        }
+    }
 
     header: ColumnLayout {
         visible: page.searchable || page.activeChips.length > 0
@@ -282,10 +373,17 @@ Kirigami.ScrollablePage {
         onContentYChanged: page.maybeMore()
         onContentHeightChanged: page.maybeMore()
 
-        header: RowLayout {
-            width: view.width
+        // Until the user scrolls, stay at the top while the header fills in (description, shelves, images arrive late).
+        onMovementStarted: page.pinTop = false
+
+        header: ColumnLayout {
+          width: view.width
+          spacing: Kirigami.Units.largeSpacing
+          onHeightChanged: if (page.pinTop) view.positionViewAtBeginning()
+
+          RowLayout {
+            Layout.fillWidth: true
             visible: page.collection && page.heading.length > 0
-            height: visible ? implicitHeight : 0
             spacing: Kirigami.Units.largeSpacing
             CoverImage {
                 source: page.headThumb
@@ -293,11 +391,21 @@ Kirigami.ScrollablePage {
                 Layout.preferredWidth: Kirigami.Units.gridUnit * 8
                 Layout.preferredHeight: Kirigami.Units.gridUnit * 8
                 Layout.margins: Kirigami.Units.largeSpacing
+                Layout.alignment: Qt.AlignTop
+                radius: width * AppConfig.coverRadiusPercent / 100
             }
             ColumnLayout {
                 Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
+                Layout.topMargin: Kirigami.Units.largeSpacing
                 Kirigami.Heading { text: page.heading; level: 1; wrapMode: Text.Wrap; Layout.fillWidth: true }
                 QQC2.Label { text: page.subheading; wrapMode: Text.Wrap; opacity: 0.7; Layout.fillWidth: true; visible: text.length > 0 }
+                // year • songs • length (albums and playlists)
+                QQC2.Label {
+                    readonly property string line: page.hero && page.hero.stats ? page.hero.stats.map(s => s.text).join(" • ") : ""
+                    text: line; visible: line.length > 0; Layout.fillWidth: true; wrapMode: Text.Wrap
+                    font: Kirigami.Theme.smallFont; opacity: 0.7
+                }
                 RowLayout {
                     QQC2.Button {
                         text: qsTr("Play")
@@ -321,14 +429,71 @@ Kirigami.ScrollablePage {
                         enabled: page.songs().length > 0
                         onClicked: { for (const s of page.songs()) Player.enqueue(JSON.stringify(s)) }
                     }
+                    QQC2.Button {
+                        text: qsTr("Download")
+                        icon.name: "download"
+                        enabled: page.songs().length > 0
+                        onClicked: Downloads.downloadAll(JSON.stringify(page.songs()))
+                    }
+                    QQC2.Button {
+                        visible: page.radio !== null
+                        text: qsTr("Radio")
+                        icon.name: "media-playlist-shuffle"
+                        onClicked: applicationWindow().open(page.radio)
+                    }
+                }
+
+                // The description or artist bio (YouTube's own text), collapsed to a few lines, with the Wikipedia link YouTube gives.
+                QQC2.Label {
+                    id: descr
+                    property bool expanded: false
+                    Layout.fillWidth: true
+                    Layout.topMargin: Kirigami.Units.smallSpacing
+                    text: page.hero && page.hero.description ? page.hero.description : ""
+                    visible: text.length > 0
+                    wrapMode: Text.Wrap
+                    maximumLineCount: expanded ? 1000 : 3
+                    elide: Text.ElideRight
+                    opacity: 0.85
+                }
+                RowLayout {
+                    visible: descr.visible
+                    Layout.fillWidth: true
+                    QQC2.ToolButton {
+                        visible: descr.truncated || descr.expanded
+                        text: descr.expanded ? qsTr("Show less") : qsTr("Read more")
+                        onClicked: descr.expanded = !descr.expanded
+                    }
+                    QQC2.ToolButton {
+                        visible: page.hero && page.hero.wikipediaUrl && page.hero.wikipediaUrl.length > 0
+                        icon.name: "internet-services"
+                        text: qsTr("From Wikipedia")
+                        onClicked: Qt.openUrlExternally(page.hero.wikipediaUrl)
+                    }
                 }
             }
+          }
+
+          // Home's and Explore's sections as shelves of cards (an artist's shelves come after its songs, in the footer).
+          Repeater {
+            model: page.shelfMode ? page.allShelves : []
+            delegate: ShelfRow {}
+          }
         }
 
-        footer: Item {
+        footer: ColumnLayout {
             width: view.width
-            height: page.loadingMore ? Kirigami.Units.gridUnit * 3 : 0
-            QQC2.BusyIndicator { anchors.centerIn: parent; running: page.loadingMore; visible: running }
+            spacing: Kirigami.Units.largeSpacing
+            // an artist's albums, singles, playlists and similar artists, below the top songs
+            Repeater {
+                model: page.shelfMode ? [] : page.shelves
+                delegate: ShelfRow {}
+            }
+            Item {
+                Layout.fillWidth: true
+                Layout.preferredHeight: page.loadingMore ? Kirigami.Units.gridUnit * 3 : 0
+                QQC2.BusyIndicator { anchors.centerIn: parent; running: page.loadingMore; visible: running }
+            }
         }
 
         section.property: "section"
@@ -359,8 +524,19 @@ Kirigami.ScrollablePage {
 
             QQC2.Menu {
                 id: rowMenu
+                property string dl: "none"          // this song's download state, read each time the menu opens
+                onAboutToShow: dl = Downloads.state(row.videoId)
                 QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: Player.playNext(JSON.stringify(page.itemAt(row.index))) }
                 QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: Player.enqueue(JSON.stringify(page.itemAt(row.index))) }
+                QQC2.MenuItem {
+                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+                    onTriggered: {
+                        if (rowMenu.dl === "failed") Downloads.retry(row.videoId)
+                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(page.itemAt(row.index)))
+                        else Downloads.remove(row.videoId)
+                    }
+                }
                 QQC2.MenuSeparator { visible: Backend.loggedIn }
                 QQC2.MenuItem {
                     visible: page.field(row.index, "artistId") !== ""
@@ -436,7 +612,7 @@ Kirigami.ScrollablePage {
         Kirigami.PlaceholderMessage {
             anchors.centerIn: parent
             width: parent.width - Kirigami.Units.gridUnit * 4
-            visible: !page.busy && model.count === 0
+            visible: !page.busy && page.items.length === 0 && page.shelves.length === 0
             icon.name: page.errorText ? "dialog-error" : "edit-none"
             text: page.errorText || page.emptyText
             explanation: page.errorDetail
@@ -449,7 +625,7 @@ Kirigami.ScrollablePage {
 
         QQC2.BusyIndicator {
             anchors.centerIn: parent
-            running: page.busy && model.count === 0
+            running: page.busy && page.items.length === 0
             visible: running
         }
     }

@@ -223,7 +223,15 @@ impl Pager {
             Pager::Tracks(p, s, c) => p.items.iter().skip(from).map(|x| track(x, s, c)).collect(),
             Pager::Albums(p, s) => p.items.iter().skip(from).map(|x| album(x, s)).collect(),
             Pager::Artists(p, s) => p.items.iter().skip(from).map(|x| artist(x, s)).collect(),
-            Pager::Playlists(p, s) => p.items.iter().skip(from).map(|x| playlist(x, s)).collect(),
+            Pager::Playlists(p, s) => {
+                let rows = p.items.iter().skip(from).map(|x| playlist(x, s)).collect();
+                // YouTube's own "Liked Music" (`LM`) is shown once, as the first row of the library (see `library`).
+                if from == 0 {
+                    rows
+                } else {
+                    without_youtube_liked(rows)
+                }
+            }
         }
     }
     async fn extend(&mut self, q: &RustyPipeQuery) -> Result<(), RpError> {
@@ -233,6 +241,32 @@ impl Pager {
             Pager::Artists(p, ..) => p.extend(q).await.map(|_| ()),
             Pager::Playlists(p, ..) => p.extend(q).await.map(|_| ()),
         }
+    }
+}
+
+fn is_youtube_liked(row: &Value) -> bool {
+    matches!(row["browseId"].as_str(), Some("LM" | "VLLM"))
+}
+
+fn without_youtube_liked(rows: Vec<Value>) -> Vec<Value> {
+    rows.into_iter().filter(|r| !is_youtube_liked(r)).collect()
+}
+
+/// Exactly one "Liked music" row, always first. YouTube's own playlist wins when it is on this page (it has the real
+/// cover); otherwise ours stands in. Both open through the same working path (`LIKED`).
+fn liked_row_first(items: &mut Vec<Value>) {
+    match items.iter().position(is_youtube_liked) {
+        Some(at) => {
+            let mut row = items.remove(at);
+            row["browseId"] = json!("LIKED");
+            items.insert(0, row);
+        }
+        None => items.insert(
+            0,
+            json!({"title": "Liked music", "subtitle": "Playlist", "artist": "", "kind": "playlist",
+            "videoId": "", "browseId": "LIKED", "thumbnail": "", "duration": "", "section": "Playlists",
+            "artistId": "", "albumId": ""}),
+        ),
     }
 }
 
@@ -438,16 +472,35 @@ async fn library(kind: &str) -> Res {
             let p = with_retry(|| aq.music_saved_playlists()).await.map_err(err)?;
             let mut v = paged("", "", "", Pager::Playlists(p, "Playlists".into()), true);
             if let Some(items) = v["items"].as_array_mut() {
-                items.insert(
-                    0,
-                    json!({"title": "Liked music", "subtitle": "Playlist", "artist": "", "kind": "playlist",
-                    "videoId": "", "browseId": "LIKED", "thumbnail": "", "duration": "", "section": "Playlists",
-                    "artistId": "", "albumId": ""}),
-                );
+                liked_row_first(items);
             }
             v
         }
     })
+}
+
+/// Add the rich parts of a page (the hero with its description/bio, stats and Wikipedia link, and horizontal shelves of
+/// cards) to the list JSON the page already gets. The page builders in `pages/` are pure and tested; the list itself is
+/// unchanged, so a page without these fields simply shows the plain list.
+fn with_page_data(mut v: Value, pd: &crate::pagedata::PageData) -> Value {
+    use crate::pagedata::SectionStyle;
+    if let Some(hero) = &pd.hero {
+        v["hero"] = serde_json::to_value(hero).unwrap_or(Value::Null);
+    }
+    let shelves: Vec<Value> = pd
+        .sections
+        .iter()
+        .filter(|s| matches!(s.style, SectionStyle::Cards | SectionStyle::Artists) && !s.items.is_empty() && !s.id.starts_with("hero-"))
+        .filter_map(|s| serde_json::to_value(s).ok())
+        .collect();
+    if !shelves.is_empty() {
+        v["shelves"] = Value::Array(shelves);
+    }
+    // an artist's radio (the hero's Radio button plays it)
+    if let Some(radio) = pd.sections.iter().find(|s| s.id == crate::pages::common::HERO_RADIO).and_then(|s| s.items.first()) {
+        v["radio"] = serde_json::to_value(radio).unwrap_or(Value::Null);
+    }
+    v
 }
 
 pub(crate) async fn browse(target: String) -> Res {
@@ -468,7 +521,7 @@ pub(crate) async fn browse(target: String) -> Res {
             let by = a.artists.iter().map(|x| x.name.as_str()).collect::<Vec<_>>().join(", ");
             let sub = format!("{:?} • {} • {}", a.album_type, by, a.year.map(|y| y.to_string()).unwrap_or_default());
             let v = a.tracks.iter().map(|t| track(t, "", &cover)).collect();
-            Ok(page(&a.name, &sub, &cover, v))
+            Ok(with_page_data(page(&a.name, &sub, &cover, v), &crate::pages::album::build(&a, &[])))
         }
         "playlist" => {
             // every spelling of "liked music" (our synthetic row, YouTube's `LM` / `VLLM`) takes the path that works
@@ -487,17 +540,19 @@ pub(crate) async fn browse(target: String) -> Res {
                 Some(n) => format!("{by} • {n} songs"),
                 None => by.to_owned(),
             };
-            Ok(paged(&p.name, sub.trim_start_matches(" • "), &cover, Pager::Tracks(p.tracks, "".into(), cover.clone()), false))
+            let pd = crate::pages::playlist::build(&p);
+            let name = p.name.clone();
+            Ok(with_page_data(
+                paged(&name, sub.trim_start_matches(" • "), &cover, Pager::Tracks(p.tracks, "".into(), cover.clone()), false),
+                &pd,
+            ))
         }
         "artist" => {
             let a = q.music_artist(id, true).await.map_err(err)?;
-            let mut v = Vec::new();
-            v.extend(a.tracks.iter().map(|t| track(t, "Top songs", "")));
-            v.extend(a.albums.iter().map(|x| album(x, "Albums & singles")));
-            v.extend(a.playlists.iter().map(|p| playlist(p, "Playlists")));
-            v.extend(a.similar_artists.iter().map(|x| artist(x, "Similar artists")));
-            let sub = a.subscriber_count.map(|n| format!("{n} subscribers")).unwrap_or_default();
-            Ok(page(&a.name, &sub, &thumb(&a.header_image), v))
+            // The list holds the top songs; albums, singles, playlists and similar artists are shelves of cards.
+            let v = a.tracks.iter().map(|t| track(t, "Top songs", "")).collect();
+            let sub = a.subscriber_count.map(crate::items::subscribers).unwrap_or_default();
+            Ok(with_page_data(page(&a.name, &sub, &thumb(&a.header_image), v), &crate::pages::artist::build(&a)))
         }
         "library" => library(id).await,
         _ => Err(format!("unknown target {target}")),
@@ -684,6 +739,102 @@ impl qobject::Backend {
             ytapi::add_to_playlist(&p, &v).await?;
             Ok(json!({"added": true}))
         })
+    }
+}
+
+#[cfg(test)]
+mod page_data_tests {
+    use super::*;
+    use crate::pagedata::{Hero, Item, ItemKind, PageData, Section, SectionStyle};
+
+    fn card(title: &str) -> Item {
+        Item { kind: ItemKind::Album, title: title.into(), browse_id: "MPREb_x".into(), ..Default::default() }
+    }
+    fn section(id: &str, style: SectionStyle, items: Vec<Item>) -> Section {
+        Section { id: id.into(), title: id.into(), style, items, ..Default::default() }
+    }
+
+    #[test]
+    fn hero_and_card_shelves_are_added_and_lists_are_not() {
+        let pd = PageData {
+            hero: Some(Hero {
+                title: "Band".into(),
+                description: "bio".into(),
+                wikipedia_url: "https://en.wikipedia.org/wiki/Band".into(),
+                ..Default::default()
+            }),
+            sections: vec![
+                section("top-songs", SectionStyle::List, vec![card("song")]),
+                section("albums", SectionStyle::Cards, vec![card("A")]),
+                section("similar", SectionStyle::Artists, vec![card("B")]),
+                section("empty", SectionStyle::Cards, vec![]),
+            ],
+            ..Default::default()
+        };
+        let v = with_page_data(json!({"title": "Band", "items": []}), &pd);
+        assert_eq!(v["hero"]["description"], "bio");
+        assert_eq!(v["hero"]["wikipediaUrl"], "https://en.wikipedia.org/wiki/Band");
+        let titles: Vec<_> = v["shelves"].as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(titles, ["albums", "similar"], "only non-empty card/artist shelves; songs stay in the list");
+        assert!(v.get("radio").is_none());
+    }
+
+    #[test]
+    fn an_artists_radio_is_passed_on_and_not_shown_as_a_shelf() {
+        let radio = Item { kind: ItemKind::Playlist, title: "Band Radio".into(), browse_id: "RDEM1".into(), ..Default::default() };
+        let pd =
+            PageData { sections: vec![section(crate::pages::common::HERO_RADIO, SectionStyle::Cards, vec![radio])], ..Default::default() };
+        let v = with_page_data(json!({}), &pd);
+        assert_eq!(v["radio"]["browseId"], "RDEM1");
+        assert!(v.get("shelves").is_none());
+    }
+
+    #[test]
+    fn a_page_without_rich_data_is_left_alone() {
+        let v = with_page_data(json!({"title": "x"}), &PageData::default());
+        assert_eq!(v, json!({"title": "x"}));
+    }
+}
+
+#[cfg(test)]
+mod liked_tests {
+    use super::*;
+
+    fn row(title: &str, id: &str, thumb: &str) -> Value {
+        json!({"title": title, "browseId": id, "thumbnail": thumb})
+    }
+
+    fn liked_count(rows: &[Value]) -> usize {
+        rows.iter().filter(|r| r["browseId"] == "LIKED").count()
+    }
+
+    #[test]
+    fn a_synthetic_row_stands_in_when_youtubes_is_not_on_the_page() {
+        let mut rows = vec![row("Mix", "PL1", "m.jpg")];
+        liked_row_first(&mut rows);
+        assert_eq!(rows[0]["title"], "Liked music");
+        assert_eq!(liked_count(&rows), 1);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn youtubes_liked_playlist_replaces_ours_and_keeps_its_cover() {
+        for lm in ["LM", "VLLM"] {
+            let mut rows = vec![row("Mix", "PL1", "m.jpg"), row("Liked Music", lm, "purple.jpg")];
+            liked_row_first(&mut rows);
+            assert_eq!(liked_count(&rows), 1, "{lm}");
+            assert_eq!(rows[0]["thumbnail"], "purple.jpg", "{lm}: the real cover is kept");
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().all(|r| !is_youtube_liked(r)));
+        }
+    }
+
+    #[test]
+    fn later_pages_never_repeat_it() {
+        let rows = vec![row("A", "PL2", ""), row("Liked Music", "LM", "p.jpg"), row("B", "PL3", "")];
+        let kept = without_youtube_liked(rows);
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().all(|r| !is_youtube_liked(r)));
     }
 }
 

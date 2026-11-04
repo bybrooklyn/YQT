@@ -3,11 +3,14 @@ import QtQuick
 import org.kde.ytm
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
-import QtMultimedia
 import org.kde.kirigami as Kirigami
 
 QQC2.ToolBar {
     id: bar
+    // Keep the active colours when the window loses focus; otherwise the slider's blue turns dark purple until focus returns.
+    Kirigami.Theme.inherit: false
+    Kirigami.Theme.colorSet: Kirigami.Theme.Window
+    Kirigami.Theme.colorGroup: Kirigami.Theme.Active
     readonly property var media: applicationWindow().media
     visible: Player.hasTrack
     position: QQC2.ToolBar.Footer
@@ -22,14 +25,14 @@ QQC2.ToolBar {
 
         RowLayout {
             Layout.fillWidth: true
-            QQC2.Label { text: bar.fmt(media.position); font: Kirigami.Theme.smallFont }
+            QQC2.Label { text: bar.fmt(applicationWindow().smoothPosition); font: Kirigami.Theme.smallFont }
             QQC2.Slider {
                 Layout.fillWidth: true
                 from: 0
                 to: Math.max(media.duration, 1)
-                value: media.position
+                value: applicationWindow().smoothPosition
                 enabled: media.duration > 0
-                onMoved: media.position = value
+                onMoved: applicationWindow().seek(value)
             }
             QQC2.Label { text: bar.fmt(media.duration); font: Kirigami.Theme.smallFont }
         }
@@ -37,17 +40,36 @@ QQC2.ToolBar {
         RowLayout {
             spacing: Kirigami.Units.smallSpacing
 
+            // Transport on the left: previous, play/pause, next.
+            QQC2.ToolButton {
+                icon.name: "media-skip-backward"
+                onClicked: applicationWindow().previousTrack()
+                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Previous")
+            }
+            QQC2.ToolButton {
+                icon.name: Player.loading ? "process-working" : (media.playing ? "media-playback-pause" : "media-playback-start")
+                onClicked: media.toggle()
+                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: media.playing ? qsTr("Pause") : qsTr("Play")
+            }
+            QQC2.ToolButton {
+                icon.name: "media-skip-forward"
+                onClicked: Player.next()
+                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Next")
+            }
+
             CoverImage {
                 source: Player.thumbnail
                 decode: 192
-                Layout.preferredWidth: Kirigami.Units.gridUnit * 2.5
-                Layout.preferredHeight: Kirigami.Units.gridUnit * 2.5
-                TapHandler { onTapped: applicationWindow().showNowPlaying("queue") }
+                Layout.leftMargin: Kirigami.Units.smallSpacing
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 3.2
+                Layout.preferredHeight: Kirigami.Units.gridUnit * 3.2
+                // Pressing the bar opens the player, and closes it again (back to the page you were on).
+                TapHandler { onTapped: applicationWindow().toggleNowPlaying() }
             }
             ColumnLayout {
                 spacing: 0
                 Layout.fillWidth: true
-                TapHandler { onTapped: applicationWindow().showNowPlaying("queue") }
+                TapHandler { onTapped: applicationWindow().toggleNowPlaying() }
                 QQC2.Label {
                     text: Player.title
                     elide: Text.ElideRight
@@ -82,18 +104,6 @@ QQC2.ToolBar {
                 checked: Player.shuffle
                 onClicked: Player.shuffle = checked
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Shuffle")
-            }
-            QQC2.ToolButton {
-                icon.name: "media-skip-backward"
-                onClicked: applicationWindow().previousTrack()
-            }
-            QQC2.ToolButton {
-                icon.name: Player.loading ? "process-working" : (media.playbackState === MediaPlayer.PlayingState ? "media-playback-pause" : "media-playback-start")
-                onClicked: { if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play() }
-            }
-            QQC2.ToolButton {
-                icon.name: "media-skip-forward"
-                onClicked: Player.next()
             }
             QQC2.ToolButton {
                 icon.name: Player.repeat === 2 ? "media-playlist-repeat-song" : "media-playlist-repeat"

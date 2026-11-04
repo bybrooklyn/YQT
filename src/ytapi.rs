@@ -38,9 +38,21 @@ pub fn parse_client_version(cache: &Value) -> Option<String> {
     ok.then(|| v.to_owned())
 }
 
+/// The configured YouTube Music address, but only if it really is a YouTube/Google host. The cookie, the signed
+/// Authorization header and the Origin are sent to it, so a config value pointing anywhere else must never be used.
+pub fn trusted_origin(configured: &str) -> Result<String, String> {
+    let origin = configured.trim_end_matches('/');
+    if is_trusted_youtube_url(origin) {
+        Ok(origin.to_owned())
+    } else {
+        Err("The YouTube address in the settings is not a YouTube address, so your sign-in is not sent there.".to_owned())
+    }
+}
+
 pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
     let yt = &crate::config::current().youtube;
-    let origin = yt.music_origin.as_str();
+    let origin = trusted_origin(&yt.music_origin)?;
+    let origin = origin.as_str();
     let version_owned = client_version();
     let version = version_owned.as_str();
     let cookie = stored_cookie().ok_or(AUTH_MSG)?;
@@ -65,7 +77,7 @@ fn web_remix_context() -> Value {
 }
 
 async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
-    let origin = crate::config::get().youtube.music_origin.clone();
+    let origin = trusted_origin(&crate::config::current().youtube.music_origin)?;
     let headers = auth_headers()?;
     body["context"] = web_remix_context();
     let mut req = http().post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false"));
@@ -74,11 +86,17 @@ async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
     }
     let resp = req.json(&body).send().await.map_err(|e| e.without_url().to_string())?;
     match resp.status().as_u16() {
-        200 => resp.json().await.map_err(|e| e.to_string()),
+        200 => {
+            let bytes = crate::state::read_limited(resp, crate::state::MAX_API_BODY).await?;
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        }
         401 | 403 => Err(AUTH_MSG.into()),
         s => {
             // YouTube explains most rejections in `error.message`; surface it (bounded, no request data echoed).
-            let text = resp.text().await.unwrap_or_default();
+            let text = match crate::state::read_limited(resp, 64 * 1024).await {
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+                Err(_) => String::new(),
+            };
             Err(format!("YouTube returned HTTP {s}{}", error_message(&text).map(|m| format!(": {m}")).unwrap_or_default()))
         }
     }
@@ -146,6 +164,24 @@ pub async fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cookie_only_goes_to_youtube_hosts() {
+        assert_eq!(trusted_origin("https://music.youtube.com").unwrap(), "https://music.youtube.com");
+        assert_eq!(trusted_origin("https://music.youtube.com/").unwrap(), "https://music.youtube.com", "a trailing slash is fine");
+        for bad in [
+            "https://attacker.example",
+            "http://music.youtube.com",
+            "https://music.youtube.com.evil.io",
+            "https://evilyoutube.com",
+            "https://user:pw@music.youtube.com",
+            "https://music.youtube.com:8443",
+            "https://127.0.0.1",
+            "",
+        ] {
+            assert!(trusted_origin(bad).is_err(), "{bad} must not receive the session cookie");
+        }
+    }
 
     #[test]
     fn client_version_is_read_from_rustypipes_cache_and_validated() {
