@@ -248,6 +248,32 @@ pub fn global() -> &'static Cache {
     })
 }
 
+/// The client for cover downloads. Unlike the shared one, every redirect hop must pass the same safety rule as the
+/// first URL (https, a DNS name, not localhost), so a redirect cannot aim a request at the local network.
+fn client() -> &'static reqwest::Client {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    C.get_or_init(|| {
+        let policy = reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() < 5 && is_fetchable(attempt.url().as_str()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        });
+        let n = &crate::config::get().network;
+        reqwest::Client::builder()
+            .redirect(policy)
+            .connect_timeout(Duration::from_secs(n.connect_timeout_secs))
+            .timeout(Duration::from_secs(n.request_timeout_secs))
+            .user_agent("ytm-qt/0.1 (GPL-3.0 YouTube Music client)")
+            .build()
+            .expect("cover http client")
+    })
+}
+
+/// At most this many cover downloads/decodes run at once.
+static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(6);
+const MAX_FAILED_REMEMBERED: usize = 512;
 static IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static FAILED: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 type Sub = Box<dyn Fn() + Send + Sync>;
@@ -272,7 +298,9 @@ pub fn prefetch(url: &str) {
     }
     let url = url.to_owned();
     crate::state::st().rt.spawn(async move {
-        let r = fetch_into(global(), crate::state::http(), &url).await;
+        // A long list asks for hundreds of covers at once; only a few are fetched and decoded at a time.
+        let _slot = SLOTS.acquire().await;
+        let r = fetch_into(global(), client(), &url).await;
         IN_FLIGHT.lock().unwrap().get_or_insert_default().remove(&hash);
         match r {
             Ok(_) => {
@@ -282,7 +310,12 @@ pub fn prefetch(url: &str) {
                 }
             }
             Err(_) => {
-                FAILED.lock().unwrap().get_or_insert_default().insert(hash, Instant::now());
+                let mut failed = FAILED.lock().unwrap();
+                let map = failed.get_or_insert_default();
+                if map.len() >= MAX_FAILED_REMEMBERED {
+                    map.retain(|_, t| t.elapsed() < RETRY_AFTER_FAILURE); // forget the ones that may be retried anyway
+                }
+                map.insert(hash, Instant::now());
             }
         }
     });

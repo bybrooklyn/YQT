@@ -47,7 +47,12 @@ profile anyway), a compromised OS, physical access.
 | S-17 | Low | The stale-file sweep removed any `*.part` in the downloads folder (e.g. a browser's) | Fixed: only this app's `<id>.<ext>.part` names |
 | S-18 | Low | A stream-check error embedded the signed stream URL in the Settings UI | Fixed: `without_url()` |
 
-Known and not yet fixed (found by the code audit, all low): stream URLs from a YouTube response are not host-checked; cover URL checks are string-level only (no DNS or redirect filtering); response bodies from YouTube are read without a size cap; a failed read of `config.toml` followed by a Settings change falls back to the template; `serve_file` has a symlink check-then-open race in a shared downloads folder; `SetPosition` over MPRIS ignores the track id.
+| S-19 | Low | Stream URLs from a YouTube response were fetched without checking the host | Fixed: only https Google/YouTube media hosts (`vision::is_media_url`); tested, and checked live against public videos |
+| S-20 | Low | Cover downloads followed redirects to any host (the https check ran after the request) | Fixed: a dedicated client whose redirect policy applies the same rule to every hop |
+| S-21 | Low | API and watch-page bodies were read without a size cap | Fixed: `state::read_limited` (8 MiB) |
+| S-22 | Low | A failed read of `config.toml` followed by a Settings change could save the template over the user's settings | Fixed: only a missing file falls back to the template; any other read error aborts the change |
+
+Known and not yet fixed (found by the code audit, all low): `serve_file` has a symlink check-then-open race when the downloads folder is a shared, writable one; MPRIS `SetPosition` ignores the track id; two simultaneous cookie imports share one temporary folder; the data/config directory falls back to `.` when the system gives none (a hostile working directory would then receive secrets); the proxy has no cap on concurrent connections and its URL registry is never pruned.
 
 ## What changed (summary)
 

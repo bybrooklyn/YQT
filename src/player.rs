@@ -367,6 +367,13 @@ impl qobject::Player {
             };
             let _ = th.queue(move |mut p| {
                 p.as_mut().st_mut().radio_busy = false;
+                // The user may have started something else while this was loading: the radio of the old song must not
+                // be appended to the new queue. Drop it, and fetch the radio for what is playing now.
+                let still_ours = p.rust().state.items().last().is_some_and(|l| s(l, "videoId") == seed);
+                if !still_ours {
+                    p.as_mut().fetch_radio(false);
+                    return;
+                }
                 let have: Vec<String> = p.rust().state.items().iter().map(|i| s(i, "videoId")).collect();
                 let new: Vec<Value> = items.into_iter().filter(|i| !have.contains(&s(i, "videoId"))).collect();
                 if !new.is_empty() {

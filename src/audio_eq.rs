@@ -140,6 +140,8 @@ impl Default for EqualizerRust {
 }
 
 static SAVE_GEN: AtomicU64 = AtomicU64::new(0);
+static SAVE_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LATEST: std::sync::Mutex<Option<(std::path::PathBuf, EqFile)>> = std::sync::Mutex::new(None);
 
 impl qobject::Equalizer {
     /// Push the current state to the engine and notify QML of what changed.
@@ -160,16 +162,25 @@ impl qobject::Equalizer {
 
     /// Save shortly after the last change (a slider drag is many changes).
     fn schedule_save(&self) {
-        let generation = SAVE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-        let snapshot = self.file_snapshot();
-        let path = self.rust().path.clone();
-        std::thread::spawn(move || {
+        SAVE_GEN.fetch_add(1, Ordering::SeqCst);
+        // Remember the newest state; one waiting thread (not one per change) saves it once things go quiet.
+        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = Some((self.rust().path.clone(), self.file_snapshot()));
+        if SAVE_WAITING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(|| loop {
+            let seen = SAVE_GEN.load(Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(600));
-            if SAVE_GEN.load(Ordering::SeqCst) == generation {
+            if SAVE_GEN.load(Ordering::SeqCst) != seen {
+                continue; // changed again meanwhile (or the save was cancelled): wait for quiet
+            }
+            if let Some((path, snapshot)) = LATEST.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 if let Err(e) = presets::save(&path, &snapshot) {
                     tracing::warn!("could not save the equalizer settings: {e}");
                 }
             }
+            SAVE_WAITING.store(false, Ordering::SeqCst);
+            break;
         });
     }
 
@@ -276,6 +287,7 @@ impl qobject::Equalizer {
 
     fn persist(&self) {
         SAVE_GEN.fetch_add(1, Ordering::SeqCst); // cancel the pending debounced save
+        *LATEST.lock().unwrap_or_else(|e| e.into_inner()) = None;
         if let Err(e) = presets::save(&self.rust().path, &self.file_snapshot()) {
             tracing::warn!("could not save the equalizer settings: {e}");
         }

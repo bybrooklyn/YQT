@@ -86,11 +86,17 @@ async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
     }
     let resp = req.json(&body).send().await.map_err(|e| e.without_url().to_string())?;
     match resp.status().as_u16() {
-        200 => resp.json().await.map_err(|e| e.to_string()),
+        200 => {
+            let bytes = crate::state::read_limited(resp, crate::state::MAX_API_BODY).await?;
+            serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        }
         401 | 403 => Err(AUTH_MSG.into()),
         s => {
             // YouTube explains most rejections in `error.message`; surface it (bounded, no request data echoed).
-            let text = resp.text().await.unwrap_or_default();
+            let text = match crate::state::read_limited(resp, 64 * 1024).await {
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+                Err(_) => String::new(),
+            };
             Err(format!("YouTube returned HTTP {s}{}", error_message(&text).map(|m| format!(": {m}")).unwrap_or_default()))
         }
     }
