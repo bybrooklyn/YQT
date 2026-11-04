@@ -252,12 +252,13 @@ fn seeking_after_the_track_ended_replays_it_like_repeat_one() {
 /// Dev check of the real device path (cpal): the stream opens and its callback pulls audio. Volume is set to 0 and the
 /// engine is only told to play after the volume ramp finished, so nothing audible is ever produced.
 /// `cargo test -- --ignored --nocapture dev_real_device`
+/// Set `YTM_DEV_DEVICE=null` to use ALSA's silent `null` device (it discards the samples) instead of the default one.
 #[test]
 #[ignore]
 fn dev_real_device_opens_and_consumes_at_volume_zero() {
     println!("output devices: {:?}", super::output::output_devices());
-    let (e, rx) =
-        Engine::start(&Backend::Device { name: String::new() }, Arc::new(Settings::new(0, true, false))).expect("open the default device");
+    let name = std::env::var("YTM_DEV_DEVICE").unwrap_or_default();
+    let (e, rx) = Engine::start(&Backend::Device { name }, Arc::new(Settings::new(0, true, false))).expect("open the output device");
     e.set_volume(0.0);
     println!("device rate: {} Hz", e.rate());
     let base = serve(Mode::Normal);
