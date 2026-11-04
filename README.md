@@ -7,6 +7,19 @@ No browser engine, no Electron, no FFmpeg, no system OpenSSL: networking is rust
 
 It looks and behaves like a normal KDE application: standard Kirigami and Breeze controls, nothing hand-drawn.
 
+<p align="center">
+  <img src="docs/img/home.png" alt="Home: shelves of cards" width="49%">
+  <img src="docs/img/artist.png" alt="An artist page with bio, Wikipedia link and top songs" width="49%">
+</p>
+<p align="center">
+  <img src="docs/img/lyrics.png" alt="Synced lyrics with the karaoke fill" width="49%">
+  <img src="docs/img/queue.png" alt="The Up next queue" width="49%">
+</p>
+<p align="center">
+  <img src="docs/img/album.png" alt="An album page" width="49%">
+  <img src="docs/img/settings.png" alt="Settings: the equalizer and downloads" width="49%">
+</p>
+
 ## Features
 
 - **Browse and play:** Home and Explore as shelves of cards; album, playlist and artist pages with a description or bio (YouTube's own text) and a Wikipedia link; Library, search, queue, shuffle, repeat, radio.
@@ -63,7 +76,8 @@ See [SECURITY.md](SECURITY.md) for the threat model. In short: your cookies stay
 ## Known gaps
 
 - The Rust audio engine is tested against reference decoders, but nobody has listened to it for long yet, which is why Qt Multimedia is still the default.
-- The *Theme* setting (light / dark) is honoured only by styles that follow Qt's colour-scheme request; the KDE desktop style follows your Plasma colour scheme instead.
+- The app follows your desktop's colour scheme; there is no separate light/dark setting (the KDE style ignores an app-level request).
+- The tray, the mini-player's always-on-top flag, and the unfocused-window colours have only been exercised headless, not on a live Plasma session.
 - NetEase lyrics use an unofficial API and may stop working.
 
 ## License
