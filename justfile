@@ -27,6 +27,12 @@ run-release *ARGS:
 test:
     cargo test
 
+# Type-check the Windows and macOS platform modules against the real target APIs (needs the rustup targets)
+check-platforms:
+    cd tests/xcheck && CARGO_TARGET_DIR=../../target/xcheck cargo check --target x86_64-pc-windows-gnu
+    cd tests/xcheck && CARGO_TARGET_DIR=../../target/xcheck cargo check --target x86_64-pc-windows-msvc
+    cd tests/xcheck && CARGO_TARGET_DIR=../../target/xcheck cargo check --target aarch64-apple-darwin
+
 # The system tray against a fake tray host on a private D-Bus session (registration, icon, menu, clicks)
 tray-test:
     dbus-run-session -- cargo test --bin ytm the_tray_registers -- --ignored

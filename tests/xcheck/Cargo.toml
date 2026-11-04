@@ -1,0 +1,19 @@
+[package]
+name = "xcheck"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not part of the app: a tiny crate that type-checks the real Windows and macOS platform modules against the real
+# target APIs, which the main crate cannot do from Linux (it needs a C++ toolchain and Qt for each target).
+# Run with `just check-platforms`.
+[workspace]
+
+[dependencies]
+dirs = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Memory", "Win32_System_Registry"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
