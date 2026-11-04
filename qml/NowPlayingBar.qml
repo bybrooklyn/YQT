@@ -3,7 +3,6 @@ import QtQuick
 import org.kde.ytm
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
-import QtMultimedia
 import org.kde.kirigami as Kirigami
 
 QQC2.ToolBar {
@@ -48,9 +47,9 @@ QQC2.ToolBar {
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Previous")
             }
             QQC2.ToolButton {
-                icon.name: Player.loading ? "process-working" : (media.playbackState === MediaPlayer.PlayingState ? "media-playback-pause" : "media-playback-start")
-                onClicked: { if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play() }
-                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: media.playbackState === MediaPlayer.PlayingState ? qsTr("Pause") : qsTr("Play")
+                icon.name: Player.loading ? "process-working" : (media.playing ? "media-playback-pause" : "media-playback-start")
+                onClicked: media.toggle()
+                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: media.playing ? qsTr("Pause") : qsTr("Play")
             }
             QQC2.ToolButton {
                 icon.name: "media-skip-forward"

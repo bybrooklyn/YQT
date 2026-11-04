@@ -430,6 +430,12 @@ Kirigami.ScrollablePage {
                         onClicked: { for (const s of page.songs()) Player.enqueue(JSON.stringify(s)) }
                     }
                     QQC2.Button {
+                        text: qsTr("Download")
+                        icon.name: "download"
+                        enabled: page.songs().length > 0
+                        onClicked: Downloads.downloadAll(JSON.stringify(page.songs()))
+                    }
+                    QQC2.Button {
                         visible: page.radio !== null
                         text: qsTr("Radio")
                         icon.name: "media-playlist-shuffle"
@@ -518,8 +524,19 @@ Kirigami.ScrollablePage {
 
             QQC2.Menu {
                 id: rowMenu
+                property string dl: "none"          // this song's download state, read each time the menu opens
+                onAboutToShow: dl = Downloads.state(row.videoId)
                 QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: Player.playNext(JSON.stringify(page.itemAt(row.index))) }
                 QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: Player.enqueue(JSON.stringify(page.itemAt(row.index))) }
+                QQC2.MenuItem {
+                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+                    onTriggered: {
+                        if (rowMenu.dl === "failed") Downloads.retry(row.videoId)
+                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(page.itemAt(row.index)))
+                        else Downloads.remove(row.videoId)
+                    }
+                }
                 QQC2.MenuSeparator { visible: Backend.loggedIn }
                 QQC2.MenuItem {
                     visible: page.field(row.index, "artistId") !== ""

@@ -207,7 +207,18 @@ Kirigami.Page {
 
                             QQC2.Menu {
                                 id: rowMenu
+                                property string dl: "none"
+                                onAboutToShow: dl = Downloads.state(slot.videoId)
                                 QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: Player.playIndex(slot.index) }
+                                QQC2.MenuItem {
+                                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+                                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+                                    onTriggered: {
+                                        if (rowMenu.dl === "failed") Downloads.retry(slot.videoId)
+                                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(slot.song))
+                                        else Downloads.remove(slot.videoId)
+                                    }
+                                }
                                 QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: slot.index !== Player.index; onTriggered: QueueModel.playRowNext(slot.index) }
                                 QQC2.MenuSeparator {}
                                 QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: slot.artistId.length > 0; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: slot.artistId, title: slot.artist}) }
