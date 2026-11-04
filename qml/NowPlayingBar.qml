@@ -44,19 +44,16 @@ QQC2.ToolBar {
             // Transport on the left: previous, play/pause, next.
             QQC2.ToolButton {
                 icon.name: "media-skip-backward"
-                icon.width: Kirigami.Units.iconSizes.medium; icon.height: Kirigami.Units.iconSizes.medium
                 onClicked: applicationWindow().previousTrack()
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Previous")
             }
             QQC2.ToolButton {
                 icon.name: Player.loading ? "process-working" : (media.playbackState === MediaPlayer.PlayingState ? "media-playback-pause" : "media-playback-start")
-                icon.width: Kirigami.Units.iconSizes.large; icon.height: Kirigami.Units.iconSizes.large
                 onClicked: { if (media.playbackState === MediaPlayer.PlayingState) media.pause(); else media.play() }
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: media.playbackState === MediaPlayer.PlayingState ? qsTr("Pause") : qsTr("Play")
             }
             QQC2.ToolButton {
                 icon.name: "media-skip-forward"
-                icon.width: Kirigami.Units.iconSizes.medium; icon.height: Kirigami.Units.iconSizes.medium
                 onClicked: Player.next()
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Next")
             }

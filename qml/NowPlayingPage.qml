@@ -238,6 +238,12 @@ Kirigami.Page {
                 Item {
                     id: lyricsPane
 
+                    // The cover's dominant colour (computed in Rust); the theme highlight until it is ready.
+                    Accent { id: accent; source: Player.cover || Player.thumbnail }
+                    readonly property color tint: accent.ready ? accent.color : Kirigami.Theme.highlightColor
+                    // Shown only as the very last line, set like a lyric.
+                    readonly property string creditText: page.lyricsSource.length > 0 ? qsTr("Lyrics from %1").arg(page.lyricsSource) : ""
+
                     // The line being sung. `rawLine` follows the player position exactly; `line` is what is shown.
                     // Moving forward is applied at once. Moving *backward* only counts once the position has stayed
                     // there for a moment, because the position can glitch backwards for an instant (stream range
@@ -264,13 +270,23 @@ Kirigami.Page {
                     ListView {
                         id: lyricsList
                         anchors.fill: parent
-                        anchors.bottomMargin: credit.visible ? credit.height + Kirigami.Units.smallSpacing : 0   // end above the credit
                         visible: page.synced.length > 0
                         clip: true
                         model: page.synced
                         bottomMargin: height / 2
                         topMargin: height / 3
                         QQC2.ScrollBar.vertical: QQC2.ScrollBar {}
+                        // The source, as a quiet last line under the final lyric.
+                        footer: QQC2.Label {
+                            width: ListView.view.width
+                            visible: lyricsPane.creditText.length > 0
+                            height: visible ? Kirigami.Units.gridUnit * 4 : 0
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            text: lyricsPane.creditText
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
+                            opacity: 0.3
+                        }
 
                         NumberAnimation { id: scrollAnim; target: lyricsList; property: "contentY"; duration: 350; easing.type: Easing.OutCubic }
                         function follow() {
@@ -296,7 +312,15 @@ Kirigami.Page {
                             Behavior on glow { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
 
                             width: ListView.view.width
-                            implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing
+                            implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing * 1.5
+
+                            // How far through its own line the song is (0..1): the karaoke fill.
+                            readonly property real progress: {
+                                if (!active) return 0
+                                const t0 = modelData[0]
+                                const next = lineItem.index + 1 < page.synced.length ? page.synced[lineItem.index + 1][0] : t0 + 4000
+                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / Math.max(1, next - t0)))
+                            }
 
                             QQC2.Label {
                                 id: label
@@ -305,10 +329,35 @@ Kirigami.Page {
                                 text: lineItem.modelData[1] || "♪"
                                 wrapMode: Text.Wrap
                                 horizontalAlignment: Text.AlignHCenter
-                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3
-                                opacity: 0.4 + 0.6 * lineItem.glow
-                                scale: 1 + 0.12 * lineItem.glow
+                                font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.9 * AppConfig.lyricsSizeScale
+                                font.bold: true
+                                opacity: 0.35 + 0.65 * lineItem.glow
+                                scale: 1 + 0.1 * lineItem.glow
                                 transformOrigin: Item.Center
+                                // The line being sung takes the cover's colour.
+                                color: lineItem.active && AppConfig.lyricsTint ? lyricsPane.tint : Kirigami.Theme.textColor
+
+                                // Karaoke: the same text in the highlight colour, revealed left to right as the line is sung.
+                                // Only for a single-line lyric (a wrapped one just keeps the tint).
+                                Item {
+                                    visible: AppConfig.lyricsKaraoke && lineItem.active && label.lineCount === 1
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    x: (label.width - label.contentWidth) / 2
+                                    width: label.contentWidth * lineItem.progress
+                                    height: label.height
+                                    clip: true
+                                    QQC2.Label {
+                                        x: 0
+                                        width: label.width
+                                        height: label.height
+                                        // keep the text where the base label draws it: offset back by the clip's own x
+                                        leftPadding: 0
+                                        text: label.text
+                                        font: label.font
+                                        horizontalAlignment: Text.AlignLeft
+                                        color: Kirigami.Theme.highlightColor
+                                    }
+                                }
                             }
                             TapHandler {
                                 onTapped: {
@@ -323,7 +372,6 @@ Kirigami.Page {
                     QQC2.ScrollView {
                         id: plainView
                         anchors.fill: parent
-                        anchors.bottomMargin: credit.visible ? credit.height + Kirigami.Units.smallSpacing : 0
                         visible: page.synced.length === 0 && page.plain.length > 0
                         // Wrap to the pane: without this the label is as wide as its longest line, which clipped
                         // text on the right and added a horizontal scrollbar.
@@ -331,21 +379,13 @@ Kirigami.Page {
                         QQC2.ScrollBar.horizontal.policy: QQC2.ScrollBar.AlwaysOff
                         QQC2.Label {
                             width: plainView.availableWidth
-                            text: page.plain
+                            // the credit follows the text as its last line
+                            text: page.plain + (lyricsPane.creditText.length > 0 ? "\n\n" + lyricsPane.creditText : "")
                             wrapMode: Text.Wrap
                             horizontalAlignment: Text.AlignHCenter
+                            font.pointSize: Kirigami.Theme.defaultFont.pointSize * 1.3 * AppConfig.lyricsSizeScale
                             padding: Kirigami.Units.largeSpacing
                         }
-                    }
-
-                    QQC2.Label {
-                        id: credit
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-                        visible: page.lyricsSource.length > 0
-                        text: page.lyricsSource === "LRCLIB" ? qsTr("Synced lyrics: LRCLIB") : page.lyricsSource
-                        font: Kirigami.Theme.smallFont
-                        opacity: 0.5
                     }
 
                     Kirigami.PlaceholderMessage {
