@@ -27,6 +27,14 @@ run-release *ARGS:
 test:
     cargo test
 
+# The system tray against a fake tray host on a private D-Bus session (registration, icon, menu, clicks)
+tray-test:
+    dbus-run-session -- cargo test --bin ytm the_tray_registers -- --ignored
+
+# QML behaviour tests with real synthesised mouse events (queue drag-to-reorder), headless
+qml-test:
+    QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=org.kde.desktop /usr/lib/qt6/bin/qmltestrunner -input tests/qml
+
 # Live checks against YouTube / LRCLIB (needs network): stream route, search, pagination, lyrics
 live:
     cargo test -- --ignored --nocapture live_ vision_route

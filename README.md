@@ -77,7 +77,8 @@ See [SECURITY.md](SECURITY.md) for the threat model. In short: your cookies stay
 
 - The Rust audio engine is tested against reference decoders, but nobody has listened to it for long yet, which is why Qt Multimedia is still the default.
 - The app follows your desktop's colour scheme; there is no separate light/dark setting (the KDE style ignores an app-level request).
-- The tray, the mini-player's always-on-top flag, and the unfocused-window colours have only been exercised headless, not on a live Plasma session.
+- Not yet confirmed on a live Plasma session: the tray icon in a real panel (it is tested against a fake tray host: `just tray-test`), the mini-player's always-on-top flag on Wayland, and the bar's colour in a genuinely unfocused window (the colour pin is checked against a forced Inactive palette).
+- Queue drag-to-reorder is tested with synthesised mouse events (`just qml-test`), not with a physical mouse.
 - NetEase lyrics use an unofficial API and may stop working.
 
 ## License

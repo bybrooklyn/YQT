@@ -797,6 +797,36 @@ mod tests {
         assert!(max_step(seam) < 0.1, "step {}", max_step(seam));
     }
 
+    /// The UI asks for the next track as soon as the previous one ends, which in a crossfade is while the fade is
+    /// still running. The engine must recognise the incoming track as the one that is playing, not reload it.
+    #[test]
+    fn asking_for_the_incoming_track_during_a_crossfade_does_not_restart_it() {
+        let (a, b) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"));
+        let rate = 48_000u32;
+        let (ev_tx, _ev_rx) = std::sync::mpsc::channel();
+        let ring = Ring::new(rate, ev_tx.clone());
+        let o = RenderOpts::default();
+        let ctl = Arc::new(Controls::default());
+        ctl.set_volume(o.volume);
+        let mut dsp = OutputDsp::with_eq(ring.clone(), ctl.clone(), Arc::new(EqShared::new(o.eq.clone())));
+        let mut core = Core::new(ring, Arc::new(Settings::new(1000, true, false)), ev_tx);
+        core.load_now(TrackStream::open_url(&a, rate).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, rate).unwrap(), b.clone())));
+        ctl.playing.store(true, Ordering::Relaxed);
+        // run (consuming the output, as a sound card would) until the crossfade has started
+        let mut block = vec![0f32; 2 * 1024];
+        for _ in 0..2000 {
+            if core.fade.is_some() {
+                break;
+            }
+            core.pump(rate as usize / 4);
+            dsp.render(&mut block);
+        }
+        assert!(core.fade.is_some(), "the fade never started");
+        assert!(core.is_playing_url(&b), "the incoming track is already being heard: loading it must be a no-op");
+        assert!(!core.is_playing_url("https://example.invalid/some-other-track"), "an unrelated url is still a real load");
+    }
+
     #[test]
     fn crossfade_overlaps_the_tracks_and_stays_smooth() {
         let (a, b) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"));

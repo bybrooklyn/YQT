@@ -208,6 +208,80 @@ mod sni {
             assert!(icons.iter().all(|i| i.data.len() == (i.width * i.height * 4) as usize));
         }
 
+        /// End to end against a stand-in for the desktop's tray host: a fake `org.kde.StatusNotifierWatcher` on the
+        /// session bus. The tray must register itself, publish its icon and tooltip, and serve its menu over dbusmenu
+        /// with the same entries the unit tests check. Needs a session bus, so it is opt-in:
+        /// `dbus-run-session -- cargo test the_tray_registers -- --ignored`
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs a D-Bus session bus (run under dbus-run-session)"]
+        async fn the_tray_registers_with_a_tray_host_and_serves_its_menu() {
+            use ksni::TrayMethods;
+            use std::time::Duration;
+            use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+
+            struct Watcher(UnboundedSender<String>);
+            #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+            impl Watcher {
+                async fn register_status_notifier_item(&self, service: String) {
+                    let _ = self.0.send(service);
+                }
+                async fn register_status_notifier_host(&self, _service: String) {}
+                #[zbus(property)]
+                async fn is_status_notifier_host_registered(&self) -> bool {
+                    true
+                }
+                #[zbus(property)]
+                async fn registered_status_notifier_items(&self) -> Vec<String> {
+                    Vec::new()
+                }
+                #[zbus(property)]
+                async fn protocol_version(&self) -> i32 {
+                    0
+                }
+            }
+
+            let (tx, mut rx) = unbounded_channel();
+            let host = zbus::connection::Builder::session()
+                .unwrap()
+                .name("org.kde.StatusNotifierWatcher")
+                .unwrap()
+                .serve_at("/StatusNotifierWatcher", Watcher(tx))
+                .unwrap()
+                .build()
+                .await
+                .expect("the fake tray host");
+
+            let state =
+                TrayState { playing: true, has_track: true, signed_in: true, liked: false, window_visible: true, mini_visible: false };
+            let clicked = Arc::new(Mutex::new(Vec::new()));
+            let sink = clicked.clone();
+            let tray = SniTray::new(tray_menu(&state), "Song — Artist".into(), Arc::new(move |a| sink.lock().unwrap().push(a)));
+            let _handle = tray.spawn().await.expect("the tray registers with the host");
+            let service = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no registration within 5 s").unwrap();
+
+            // The registered item publishes its title, tooltip and icon.
+            let item = zbus::Proxy::new(&host, service.clone(), "/StatusNotifierItem", "org.kde.StatusNotifierItem").await.unwrap();
+            let title: String = item.get_property("Title").await.unwrap();
+            assert_eq!(title, "YT Music");
+            let icons: Vec<(i32, i32, Vec<u8>)> = item.get_property("IconPixmap").await.unwrap();
+            assert_eq!(icons.iter().map(|i| i.0).collect::<Vec<_>>(), [32, 64], "our logo at both sizes");
+
+            // The menu comes over dbusmenu with the labels from `tray_menu`.
+            let menu = zbus::Proxy::new(&host, service, "/MenuBar", "com.canonical.dbusmenu").await.unwrap();
+            let reply = menu.call_method("GetLayout", &(0i32, -1i32, Vec::<String>::new())).await.unwrap();
+            let layout = String::from_utf8_lossy(reply.body().data().bytes()).into_owned();
+            for label in ["Pause", "Previous", "Next", "Like", "Hide window", "Mini-player", "Quit"] {
+                assert!(layout.contains(label), "the tray menu is missing {label:?}: {layout}");
+            }
+
+            // Clicking "Next" (item 3: Pause, Previous, Next, ...) and then "Quit" (item 9) reaches the app as actions.
+            for id in [3i32, 9] {
+                menu.call_method("Event", &(id, "clicked", zbus::zvariant::Value::from(0i32), 0u32)).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(*clicked.lock().unwrap(), vec![Action::Next, Action::Quit]);
+        }
+
         #[test]
         fn the_menu_mirrors_the_entries_and_activation_reports_the_action() {
             let seen = Arc::new(Mutex::new(Vec::new()));
