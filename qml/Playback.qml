@@ -71,9 +71,11 @@ Item {
         onTriggered: pb._smooth = clock.positionAt(Date.now())
     }
 
+    // The engine is chosen once, at start-up: changing "Audio engine" takes effect after a restart (as the setting says),
+    // never by swapping the backend under a playing track.
     Loader {
         id: backend
-        source: AppConfig.audioEngine === "rust" ? "RustPlayback.qml" : "QtPlayback.qml"
+        Component.onCompleted: source = AppConfig.audioEngine === "rust" ? "RustPlayback.qml" : "QtPlayback.qml"
     }
     // `source` goes last: the backend decides whether to start playing from `autoplay` the moment the source arrives.
     Binding { target: backend.item; property: "volume"; value: pb.volume; when: backend.item !== null }

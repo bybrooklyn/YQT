@@ -177,7 +177,8 @@ pub fn init() {
 }
 
 fn install_panic_hook(redact_on: bool) {
-    let prev = std::panic::take_hook();
+    // Replace the default hook instead of chaining to it: the default one prints the raw payload and location,
+    // bypassing the redaction below (a panic message can carry a signed stream URL or a cookie).
     std::panic::set_hook(Box::new(move |info| {
         let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
             (*s).to_owned()
@@ -189,7 +190,7 @@ fn install_panic_hook(redact_on: bool) {
         let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         let note = crash_note(&msg, &loc, redact_on);
         tracing::error!("{note}");
-        prev(info);
+        eprintln!("{note}");
     }));
 }
 

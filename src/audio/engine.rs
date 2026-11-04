@@ -171,6 +171,11 @@ impl Core {
     /// True when `url` is the track that is playing right now (so `load(url)` needs to do nothing): it happens
     /// after a gapless switch, when the UI catches up with the engine.
     pub fn is_playing_url(&self, url: &str) -> bool {
+        // During a crossfade the incoming track is already what is heard while `cur` is still the outgoing one: the UI
+        // asking for the incoming track must not cut the fade and restart it.
+        if self.fade.is_some() && self.next.as_ref().is_some_and(|n| n.meta.url == url) {
+            return true;
+        }
         let playing = self.ring.playing();
         match (&self.cur, playing) {
             (Some(c), Some(p)) => c.meta.serial == p.serial && p.url == url,

@@ -76,6 +76,9 @@ pub struct PlanState {
     pub queue_ahead: Vec<String>,
     /// Songs of "keep offline" collections that are not necessarily downloaded yet.
     pub pinned_wanted: Vec<String>,
+    /// The song playing now and the next few: never evicted, whether or not smart downloads are on (the player may be
+    /// reading that very file).
+    pub in_use: Vec<String>,
     /// Free space on the downloads volume, if known.
     pub free_bytes: Option<u64>,
 }
@@ -150,7 +153,8 @@ pub fn unplayed_victims(stored: &[Stored], days: u32, now: i64) -> Vec<&Stored> 
 pub fn plan(state: &PlanState, rules: &Rules, now: i64) -> Vec<Action> {
     let mut actions = Vec::new();
     let wanted = wanted(state, rules);
-    let protected: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+    let mut protected: HashSet<&str> = wanted.iter().map(|(id, _)| id.as_str()).collect();
+    protected.extend(state.in_use.iter().map(String::as_str));
     let mut removed: HashSet<&str> = HashSet::new();
     let mut used: u64 = state.stored.iter().map(|s| s.size).sum();
 
@@ -167,6 +171,9 @@ pub fn plan(state: &PlanState, rules: &Rules, now: i64) -> Vec<Action> {
         for s in eviction_order(&state.stored, &protected) {
             if used <= rules.cap_bytes {
                 break;
+            }
+            if state.in_use.contains(&s.id) {
+                continue; // being played right now (or next): the player may be reading that file
             }
             if removed.insert(&s.id) {
                 actions.push(Action::Evict { id: s.id.clone(), why: Why::Cap });
@@ -311,6 +318,23 @@ mod tests {
         let a = plan(&st, &r, NOW);
         assert_eq!(evictions(&a), ["a", "b"]);
         assert!(a.iter().all(|x| matches!(x, Action::Evict { why: Why::Cap, .. })));
+    }
+
+    #[test]
+    fn the_song_being_played_is_never_evicted_even_over_the_cap_and_with_smart_downloads_off() {
+        let stored = vec![
+            s("playing", 40_000_000, 10, Some(1), false), // the oldest, so the first candidate
+            s("b", 40_000_000, 40, Some(20), false),
+            s("c", 40_000_000, 30, Some(25), false),
+        ];
+        let st = PlanState { stored, in_use: ids(&["playing"]), ..Default::default() };
+        let mut r = rules();
+        r.cap_bytes = 50_000_000;
+        r.remove_unplayed_days = 1; // and "not played for a day" must not take it either
+        let actions = plan(&st, &r, NOW);
+        let ev = evictions(&actions);
+        assert!(!ev.contains(&"playing"), "{ev:?}");
+        assert!(ev.contains(&"b") || ev.contains(&"c"), "others still go: {ev:?}");
     }
 
     #[test]

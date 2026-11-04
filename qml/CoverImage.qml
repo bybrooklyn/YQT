@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import QtQuick.Effects
+import org.kde.ytm
 import org.kde.kirigami as Kirigami
 
 // Album/track cover that never looks broken: a neutral placeholder shows while the image loads, when there is
@@ -41,7 +42,7 @@ Item {
         fillMode: root.fillMode
         visible: !root.rounded          // when rounded, the masked copy below is what is drawn
         opacity: status === Image.Ready ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 180 } }
+        Behavior on opacity { enabled: !AppConfig.reduceMotion; NumberAnimation { duration: 180 } }
     }
 
     // Rounded corners (only when a larger radius was asked for): the image masked by a rounded rectangle.

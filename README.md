@@ -5,14 +5,18 @@
 A native YouTube Music client written in **Rust**, **Qt 6** ([cxx-qt](https://github.com/KDAB/cxx-qt)) and **Kirigami**.
 No browser engine, no Electron, no FFmpeg, no system OpenSSL: networking is rustls and the optional audio engine is pure Rust.
 
+It looks and behaves like a normal KDE application: standard Kirigami and Breeze controls, nothing hand-drawn.
+
 ## Features
 
-- **Browse and play:** Home, Explore, Library, search, albums, playlists and artists; queue, shuffle, repeat, radio.
-- **Lyrics:** [LRCLIB](https://lrclib.net), NetEase and YouTube's plain lyrics are asked in parallel and line-synced lyrics always win. Each provider can be switched off; they only ever receive title, artist and duration.
-- **Sign-in:** Settings → *Import from <browser>* (Chrome, Chromium, Brave, Vivaldi, Edge, Opera, Firefox, Zen, LibreWolf, Waterfox) or paste cookies. Enables Library, Liked music, History, personalised Home, likes and add-to-playlist.
-- **Desktop integration:** MPRIS media keys on Linux; the queue, track and position are restored on launch.
-
-Working on the Rust side but **not yet in the interface** (they get added to the original look one at a time): downloads and offline playback, the pure-Rust audio engine with a 10-band equalizer, the mini-player and system tray, and reporting plays back to YouTube.
+- **Browse and play:** Home and Explore as shelves of cards; album, playlist and artist pages with a description or bio (YouTube's own text) and a Wikipedia link; Library, search, queue, shuffle, repeat, radio.
+- **Lyrics:** [LRCLIB](https://lrclib.net), NetEase and YouTube's plain lyrics are asked in parallel and line-synced lyrics always win. Big type, the current line tinted with the cover's colour and filled as it is sung, the source as a quiet last line. Each provider can be switched off; they only ever receive title, artist and duration.
+- **Player:** transport on the left of the bar, smooth progress, press the bar to open or close the player; the queue reorders by dragging and has a ⋮ and right-click menu on every row.
+- **Downloads:** per song, album or playlist, plus opt-in smart downloads (liked songs, recently played, upcoming queue) within a storage limit (4 GB by default, configurable). Quality, your own folder, and automatic pause on a metered connection or low battery. Downloaded songs play from disk and work offline.
+- **Audio:** Qt Multimedia by default; switch to the built-in **pure-Rust engine** (symphonia, Opus via [opus-rs](https://crates.io/crates/opus-rs), AAC, resampling, limiter) for gapless playback, crossfade, loudness normalisation and a **10-band equalizer** with presets and preamp.
+- **Mini-player and system tray** (Linux: a StatusNotifierItem over D-Bus), close to the tray, MPRIS media keys, configurable keyboard shortcuts.
+- **Sign-in:** Settings → *Import from <browser>* (Chrome, Chromium, Brave, Vivaldi, Edge, Opera, Firefox, Zen, LibreWolf, Waterfox) or paste cookies. Enables Library, Liked music, History, personalised Home, likes and add-to-playlist, and **reports plays back to YouTube** so your history and recommendations stay right (Settings → Privacy turns it off).
+- **Settings:** one scrolling page; every change is validated, saved to `config.toml` with your comments intact, and applies at once.
 
 ## Build and run
 

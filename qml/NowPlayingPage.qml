@@ -251,7 +251,7 @@ Kirigami.Page {
 
                     // The cover's dominant colour (computed in Rust); the theme highlight until it is ready.
                     Accent { id: accent; source: Player.cover || Player.thumbnail }
-                    readonly property color tint: accent.ready ? accent.color : Kirigami.Theme.highlightColor
+                    readonly property color tint: accent.ready && AppConfig.accentFromCover ? accent.color : Kirigami.Theme.highlightColor
                     // Shown only as the very last line, set like a lyric.
                     readonly property string creditText: page.lyricsSource.length > 0 ? qsTr("Lyrics from %1").arg(page.lyricsSource) : ""
 
@@ -299,7 +299,7 @@ Kirigami.Page {
                             opacity: 0.3
                         }
 
-                        NumberAnimation { id: scrollAnim; target: lyricsList; property: "contentY"; duration: 350; easing.type: Easing.OutCubic }
+                        NumberAnimation { id: scrollAnim; target: lyricsList; property: "contentY"; duration: AppConfig.reduceMotion ? 0 : 350; easing.type: Easing.OutCubic }
                         function follow() {
                             const cur = lyricsPane.line
                             if (cur < 0 || dragging || flicking) return
@@ -320,7 +320,7 @@ Kirigami.Page {
                             required property var modelData
                             readonly property bool active: index === lyricsPane.line
                             property real glow: active ? 1 : 0
-                            Behavior on glow { NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
+                            Behavior on glow { enabled: !AppConfig.reduceMotion; NumberAnimation { duration: 260; easing.type: Easing.OutCubic } }
 
                             width: ListView.view.width
                             implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing * 1.5

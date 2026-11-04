@@ -10,12 +10,6 @@ import org.kde.kirigami as Kirigami
 Kirigami.ScrollablePage {
     id: page
     title: qsTr("Downloads")
-    // Same surface as every other page (ScrollablePage defaults to the brighter "View" colours).
-    Kirigami.Theme.inherit: false
-    Kirigami.Theme.colorSet: Kirigami.Theme.Window
-    Kirigami.Theme.colorGroup: Kirigami.Theme.Active
-
-    /// Which drawer entry is highlighted while this page is shown.
 
 
     property var rows: []
@@ -91,8 +85,6 @@ Kirigami.ScrollablePage {
                     from: 0
                     to: Math.max(Downloads.capBytes, 1)
                     value: Math.min(Downloads.usedBytes, Math.max(Downloads.capBytes, 1))
-                    Kirigami.Theme.inherit: false
-                    Kirigami.Theme.colorGroup: Kirigami.Theme.Active
                 }
             }
 
@@ -113,8 +105,6 @@ Kirigami.ScrollablePage {
             readonly property bool done: modelData.state === "downloaded"
             width: ListView.view.width
             highlighted: Player.hasTrack && Player.videoId === modelData.videoId
-            Kirigami.Theme.inherit: false
-            Kirigami.Theme.colorGroup: Kirigami.Theme.Active
 
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing

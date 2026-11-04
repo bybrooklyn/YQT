@@ -375,11 +375,18 @@ async fn handle(mut sock: TcpStream, client: reqwest::Client, ctx: &Ctx) -> std:
     }
     let mut pos = start;
     loop {
+        let before = pos;
         while let Ok(Some(bytes)) = resp.chunk().await {
-            pos += bytes.len() as u64;
-            sock.write_all(&bytes).await?; // client closing (seek/skip) ends the loop
+            // never send more than the Content-Length we promised, whatever the upstream does
+            let take = (bytes.len() as u64).min(end + 1 - pos) as usize;
+            pos += take as u64;
+            sock.write_all(&bytes[..take]).await?; // client closing (seek/skip) ends the loop
+            if pos > end {
+                return Ok(());
+            }
         }
-        if pos > end {
+        // An empty or failing answer made no progress: stop instead of asking for the same range forever.
+        if pos > end || pos == before {
             return Ok(());
         }
         resp = match fetch(pos, end.min(pos.saturating_add(ch - 1))).await {

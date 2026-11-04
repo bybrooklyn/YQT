@@ -22,7 +22,9 @@ Window {
     minimumWidth: Kirigami.Units.gridUnit * 18
     minimumHeight: Kirigami.Units.gridUnit * 6
     title: Player.hasTrack ? qsTr("%1 — YT Music").arg(Player.title) : qsTr("YT Music")
-    flags: Qt.Tool | Qt.WindowCloseButtonHint | Qt.WindowTitleHint | (AppConfig.miniAlwaysOnTop ? Qt.WindowStaysOnTopHint : 0)
+    // A normal top-level window (own taskbar entry, not tied to the main window, so it stays when that one is hidden to the tray).
+    transientParent: null
+    flags: Qt.Window | Qt.WindowCloseButtonHint | Qt.WindowTitleHint | (AppConfig.miniAlwaysOnTop ? Qt.WindowStaysOnTopHint : 0)
 
     function toggle() {
         if (visible) hide()

@@ -288,7 +288,12 @@ pub fn reconcile(store: &Store, dir: &Path) -> Vec<String> {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().is_some_and(|x| x == "part") {
+            // only our own partial files (`<11-char id>.<ext>.part`): the folder may be a shared one such as ~/Downloads
+            let ours = e
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n.len() > 12 && n.is_char_boundary(11) && valid_id(&n[..11]) && n.as_bytes()[11] == b'.');
+            if ours && p.extension().is_some_and(|x| x == "part") {
                 let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|m| m.elapsed().ok()).is_some_and(|a| a > STALE_PART_AGE);
                 if old {
                     let _ = std::fs::remove_file(p);
@@ -346,6 +351,8 @@ struct Inputs {
     liked: Vec<Item>,
     recent: Vec<Item>,
     queue: Vec<Item>,
+    /// The song playing now and the next few (ids): never evicted.
+    playing: Vec<String>,
 }
 
 #[derive(Default)]
@@ -652,6 +659,12 @@ pub fn played(id: &str) {
     }
 }
 
+/// Tell the planner which songs are in use right now (the playing one and the next few), so eviction leaves them alone
+/// whether or not smart downloads are on. Cheap: it only records them, the next planner run honours them.
+pub fn set_playing(ids: Vec<String>) {
+    mgr().inner.lock().unwrap().inputs.playing = ids;
+}
+
 /// Inputs for the smart rules. `kind` = `"liked"`, `"recent"` or `"queue"` (the next songs, in play order).
 pub fn set_inputs(kind: &str, items: Vec<Item>) {
     {
@@ -902,6 +915,7 @@ pub fn evaluate() {
             recent: ids(&i.inputs.recent),
             queue_ahead: ids(&i.inputs.queue),
             pinned_wanted,
+            in_use: i.inputs.playing.clone(),
             free_bytes: free_space(&cfg.dir),
         };
         (st, lookup)

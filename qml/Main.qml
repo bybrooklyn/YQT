@@ -129,8 +129,11 @@ Kirigami.ApplicationWindow {
 
     // Keyboard shortcuts come from Settings → Keyboard shortcuts (config `[keys]`, delivered as JSON by AppConfig).
     readonly property var keys: { try { return JSON.parse(AppConfig.shortcutsJson) } catch (e) { return ({}) } }
-    // A text field must keep Space and the arrow keys for itself.
-    readonly property bool typing: !!root.activeFocusItem && root.activeFocusItem.inputMethodHints !== undefined
+    // A text field, button, slider or combo box that has focus must keep Space and the arrow keys for itself.
+    readonly property bool typing: {
+        const f = root.activeFocusItem
+        return !!f && (f.inputMethodHints !== undefined || f.pressed !== undefined || f.stepSize !== undefined || f.popup !== undefined)
+    }
     function nudgeVolume(delta) { Player.volume = Math.max(0, Math.min(1, Player.volume + delta)) }
 
     Shortcut { sequence: root.keys.fullscreen || ""; enabled: !!root.keys.fullscreen; onActivated: root.toggleFullScreen() }
@@ -232,7 +235,7 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: qsTr("Downloads"); icon.name: "folder-download"; onTriggered: root.go("downloads") },
             Kirigami.Action { separator: true },
             Kirigami.Action { text: qsTr("Now Playing"); icon.name: "media-playback-start"; enabled: Player.hasTrack; onTriggered: root.showNowPlaying("queue") },
-            Kirigami.Action { text: qsTr("Queue"); icon.name: "view-media-playlist"; onTriggered: root.go("queue") },
+            Kirigami.Action { text: qsTr("Queue"); icon.name: "view-media-playlist"; enabled: Player.hasTrack; onTriggered: root.go("queue") },
             Kirigami.Action { text: qsTr("Mini-player"); icon.name: "window-duplicate"; onTriggered: root.toggleMiniPlayer() },
             Kirigami.Action { separator: true },
             Kirigami.Action { text: qsTr("Settings"); icon.name: "configure"; onTriggered: root.go("settings") }
@@ -260,6 +263,7 @@ Kirigami.ApplicationWindow {
             root.hide()
         } else {
             mini.visible = false
+            Qt.quit()
         }
     }
 
