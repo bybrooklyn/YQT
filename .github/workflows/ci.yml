@@ -1,5 +1,5 @@
-# CI for ytm. NOTE: written without being able to run it – the Linux job is the reference;
-# the Windows and macOS jobs are experimental (Kirigami has to come from KDE Craft there) and may need tweaks.
+# CI for YQT. NOTE: written without being able to run it – the Linux job is the reference;
+# the Windows and macOS jobs are experimental (Kirigami has to come from KDE Craft there; see packaging/windows) and may need tweaks.
 name: ci
 
 on:

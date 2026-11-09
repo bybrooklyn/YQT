@@ -15,6 +15,14 @@ pub struct Item {
     pub end: i64,
     pub text: String,
     pub gap: bool,
+    /// How long the karaoke fill takes: the estimated time to sing the line, never more than the line's span.
+    /// (The fill used to run to the next line's start, so a line followed by silence crawled and finished late.)
+    pub fill_ms: i64,
+}
+
+/// Estimated time the voice is actually on a line, bounded by the time the line owns.
+fn fill_ms(text: &str, span: i64) -> i64 {
+    (sung_ms(text) * 5 / 4).min(span).max(1)
 }
 
 /// How long a line of this length takes to sing, roughly: used to find the pause *after* a line when the
@@ -26,7 +34,7 @@ pub fn sung_ms(text: &str) -> i64 {
 /// Build the display list. `track_ms` (0 = unknown) bounds the last line.
 pub fn items(lines: &[Line], track_ms: i64) -> Vec<Item> {
     let mut out: Vec<Item> = Vec::new();
-    let gap = |start: i64, end: i64| Item { start, end, text: String::new(), gap: true };
+    let gap = |start: i64, end: i64| Item { start, end, text: String::new(), gap: true, fill_ms: 1 };
     if let Some((first, _)) = lines.iter().find(|(_, t)| !t.trim().is_empty()) {
         if *first >= GAP_MIN_MS {
             out.push(gap(0, *first)); // intro
@@ -47,19 +55,19 @@ pub fn items(lines: &[Line], track_ms: i64) -> Vec<Item> {
         }
         let sung = sung_ms(text);
         if end - start - sung >= GAP_MIN_MS && i + 1 < lines.len() {
-            out.push(Item { start: *start, end: start + sung, text: text.clone(), gap: false });
+            out.push(Item { start: *start, end: start + sung, text: text.clone(), gap: false, fill_ms: fill_ms(text, sung) });
             out.push(gap(start + sung, end));
         } else {
-            out.push(Item { start: *start, end, text: text.clone(), gap: false });
+            out.push(Item { start: *start, end, text: text.clone(), gap: false, fill_ms: fill_ms(text, end - start) });
         }
     }
     out
 }
 
-/// The `[[ms, text, end, gap], …]` JSON the QML panel reads. The first two entries are the plain
+/// The `[[ms, text, end, gap, fillMs], …]` JSON the QML panel reads. The first two entries are the plain
 /// `[ms, text]` pair, so a consumer that only cares about timing can ignore the rest.
 pub fn to_json(items: &[Item]) -> String {
-    let v: Vec<serde_json::Value> = items.iter().map(|i| serde_json::json!([i.start, i.text, i.end, i.gap])).collect();
+    let v: Vec<serde_json::Value> = items.iter().map(|i| serde_json::json!([i.start, i.text, i.end, i.gap, i.fill_ms])).collect();
     serde_json::Value::Array(v).to_string()
 }
 
@@ -69,7 +77,7 @@ mod tests {
     use crate::lyrics::parse::parse_lrc;
 
     fn it(start: i64, end: i64, text: &str, gap: bool) -> Item {
-        Item { start, end, text: text.into(), gap }
+        Item { start, end, text: text.into(), gap, fill_ms: if gap { 1 } else { fill_ms(text, end - start) } }
     }
 
     #[test]
@@ -123,5 +131,17 @@ mod tests {
         assert_eq!(j[1][1], "a");
         assert_eq!(j[0][3], true);
         assert!(items(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn fill_covers_the_sung_time_not_the_silence_after_the_line() {
+        // a short line followed by 3.5 s of nothing (below the dots threshold): the fill must not crawl across it
+        let l = parse_lrc("[00:01.00]hi\n[00:04.50]next");
+        let got = items(&l, 0);
+        assert_eq!(got[0].end, 4500);
+        assert!(got[0].fill_ms < 3500 && got[0].fill_ms >= 1500, "{}", got[0].fill_ms);
+        // a line that owns less time than the estimate is bounded by it
+        let l = parse_lrc("[00:01.00]a rather long line of words here\n[00:02.00]x");
+        assert_eq!(items(&l, 0)[0].fill_ms, 1000);
     }
 }

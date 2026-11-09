@@ -219,7 +219,7 @@ async fn resolve(id: &str, playing: bool) -> Result<String, String> {
                 Ok(p) => p,
                 Err(e2) => {
                     set_health(format!("Both stream routes failed. visionOS: {e}"));
-                    return Err(e2.to_string());
+                    return Err(explain_failure(&e, &e2.to_string()));
                 }
             };
             set_health(format!("Fallback route (RustyPipe iOS) – streams may cut off after ~1 min. visionOS: {e}"));
@@ -230,6 +230,20 @@ async fn resolve(id: &str, playing: bool) -> Result<String, String> {
     let url = crate::proxy::local_url(id, &real, &ua);
     CACHE.lock().unwrap().get_or_insert_default().insert(id.to_owned(), (url.clone(), Instant::now()));
     Ok(url)
+}
+
+/// What the user sees when neither stream route worked. The raw second error is usually an internal extraction
+/// message ("deobfuscation error: could not extract sig fn name") that says nothing useful, so the first route's
+/// reason is used when it explains the problem.
+fn explain_failure(vision: &str, fallback: &str) -> String {
+    let v = vision.to_lowercase();
+    if v.contains("confirm your age") || v.contains("age-restricted") {
+        "YouTube is asking for an age check on this song and didn't accept the app's sign-in for it. Try signing in again from Settings (Import from your browser).".to_owned()
+    } else if v.contains("not available") || v.contains("unavailable") || v.contains("private video") {
+        "YouTube says this song isn't available (removed, private, or blocked in your region).".to_owned()
+    } else {
+        fallback.to_owned()
+    }
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -321,6 +335,18 @@ impl qobject::Player {
         self.as_mut().set_loading(true);
 
         self.feed_smart_downloads(i);
+
+        // Lyrics for this song and the next: by the time the lyrics tab opens (or the song changes) they are cached.
+        for j in [i, i + 1] {
+            if let Some(it) = self.rust().state.get(j) {
+                crate::lyrics::prefetch(crate::lyrics::rank::Query {
+                    video_id: s(it, "videoId"),
+                    title: s(it, "title"),
+                    artist: s(it, "artist"),
+                    duration_s: crate::items::parse_dur(&s(it, "duration")),
+                });
+            }
+        }
 
         let next_vid = self.rust().state.get(i + 1).map(|n| s(n, "videoId")).filter(|_| crate::config::current().playback.prefetch_next);
         let th = self.qt_thread();
@@ -677,5 +703,17 @@ impl QueueEditor for PlayerEditor<'_> {
     }
     fn play_row_next(&mut self, at: usize) {
         self.0.as_mut().move_to_next(at);
+    }
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use super::explain_failure;
+
+    #[test]
+    fn age_restriction_and_removal_get_plain_messages_and_other_errors_pass_through() {
+        assert!(explain_failure("visionOS: no streams (Sign in to confirm your age)", "deobfuscation error").contains("age check"));
+        assert!(explain_failure("visionOS: no streams (Video unavailable)", "x").contains("isn't available"));
+        assert_eq!(explain_failure("visionOS: timeout", "network down"), "network down");
     }
 }

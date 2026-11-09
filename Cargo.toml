@@ -1,5 +1,5 @@
 [package]
-name = "ytm"
+name = "yqt"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
@@ -10,8 +10,9 @@ cxx = "1"
 cxx-qt = "0.10"
 cxx-qt-lib = { version = "0.10", features = ["qt_full"] }
 rustypipe = { version = "0.11", default-features = false, features = ["userdata", "rustls-tls-webpki-roots"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "fs"] }
 tracing = "0.1"
+libc = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std", "registry"] }
 tracing-appender = "0.2"
 regex = "1"

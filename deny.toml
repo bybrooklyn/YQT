@@ -1,4 +1,4 @@
-# cargo-deny policy for ytm (GPL-3.0-only).  Run: cargo deny check advisories licenses bans sources
+# cargo-deny policy for YQT (GPL-3.0-only).  Run: cargo deny check advisories licenses bans sources
 [graph]
 all-features = false
 

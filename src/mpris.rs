@@ -66,11 +66,11 @@ impl Root {
     }
     #[zbus(property)]
     fn identity(&self) -> &str {
-        "YT Music"
+        "YQT"
     }
     #[zbus(property)]
     fn desktop_entry(&self) -> &str {
-        "org.kde.ytm"
+        "org.kde.yqt"
     }
     #[zbus(property)]
     fn supported_uri_schemes(&self) -> Vec<String> {
@@ -247,7 +247,7 @@ pub fn start(forward: impl Fn(&str, i64) + Send + Sync + 'static) {
     }
     st().rt.spawn(async {
         let built = zbus::connection::Builder::session()
-            .and_then(|b| b.name("org.mpris.MediaPlayer2.ytm"))
+            .and_then(|b| b.name("org.mpris.MediaPlayer2.yqt"))
             .and_then(|b| b.serve_at(PATH, Root))
             .and_then(|b| b.serve_at(PATH, PlayerIface));
         match built {

@@ -8,7 +8,7 @@ import org.kde.kirigami as Kirigami
 Kirigami.ApplicationWindow {
     id: root
 
-    title: Player.hasTrack ? qsTr("%1 — YT Music").arg(Player.title) : qsTr("YT Music")
+    title: Player.hasTrack ? qsTr("%1 — YQT").arg(Player.title) : qsTr("YQT")
     width: Kirigami.Units.gridUnit * 50
     height: Kirigami.Units.gridUnit * 36
     minimumWidth: Kirigami.Units.gridUnit * 20
@@ -37,6 +37,9 @@ Kirigami.ApplicationWindow {
         nextSource: Player.nextSource      // decoded ahead by the Rust engine for gapless playback and crossfade
         volume: Player.volume
         autoplay: Player.autoplay
+        // Per-frame position only while the synced lyrics are actually on screen.
+        smooth: root.visible && root.visibility !== Window.Minimized && !!pageStack.currentItem
+                && !!pageStack.currentItem.isNowPlaying && pageStack.currentItem.tab === "lyrics"
         onFailed: message => Player.mediaFailed(message)
         onPlayingChanged: root.syncMpris()
         onDurationChanged: root.syncMpris()
@@ -60,6 +63,14 @@ Kirigami.ApplicationWindow {
         property bool shuffle: false
         property int repeat: 0
     }
+    // Recent searches, newest first (shown under the search field while it is empty).
+    Settings {
+        id: searchPrefs
+        category: "search"
+        property string recent: "[]"
+    }
+    readonly property var recentSearches: { try { return JSON.parse(searchPrefs.recent) } catch (e) { return [] } }
+    function clearRecentSearches() { searchPrefs.recent = "[]" }
     Component.onDestruction: {
         root.saveSession()
         prefs.volume = Player.volume
@@ -152,13 +163,20 @@ Kirigami.ApplicationWindow {
     Shortcut { sequence: "Media Next"; onActivated: Player.next() }
     Shortcut { sequence: "Media Previous"; onActivated: root.previousTrack() }
 
+    // Search is on every page except the player.
+    header: SearchBar {
+        id: searchBar
+        visible: !(pageStack.currentItem && pageStack.currentItem.isNowPlaying)
+        query: { const p = pageStack.currentItem; return p && p.query ? p.query : "" }
+    }
+
     function focusSearch() {
-        const p = pageStack.currentItem
-        if (p && p.focusSearch) p.focusSearch()
+        if (searchBar.visible) searchBar.focusSearch()
     }
 
     function go(name) {
         pageStack.clear()
+        Qt.callLater(Backend.trimMemory)   // after the old pages are gone
         switch (name) {
         case "home":
             pageStack.push(itemsUrl, {title: qsTr("Home"), target: "home", reloadOnLogin: true})
@@ -192,8 +210,13 @@ Kirigami.ApplicationWindow {
     function search(text) {
         if (text.trim().length === 0)
             return
+        const q = text.trim()
+        const list = root.recentSearches.filter(s => s.toLowerCase() !== q.toLowerCase())
+        list.unshift(q)
+        searchPrefs.recent = JSON.stringify(list.slice(0, 8))
         pageStack.clear()
-        pageStack.push(itemsUrl, {title: qsTr("Search"), query: text.trim()})
+        Qt.callLater(Backend.trimMemory)
+        pageStack.push(itemsUrl, {title: qsTr("Search"), query: q})
     }
 
     function open(item) {
@@ -224,10 +247,8 @@ Kirigami.ApplicationWindow {
     AddToPlaylistDialog { id: addDialog }
 
     globalDrawer: Kirigami.GlobalDrawer {
-        title: qsTr("YT Music")
-        titleIcon: "multimedia-audio-player"
-        // Wider than the default so the labels are comfortable to read and to hit.
-        width: Kirigami.Units.gridUnit * 18
+        title: qsTr("YQT")
+        titleIcon: "qrc:/yqt/logo.svg"
         actions: [
             Kirigami.Action { text: qsTr("Home"); icon.name: "go-home"; onTriggered: root.go("home") },
             Kirigami.Action { text: qsTr("Explore"); icon.name: "view-list-icons"; onTriggered: root.go("explore") },
@@ -239,7 +260,6 @@ Kirigami.ApplicationWindow {
             Kirigami.Action { text: qsTr("Mini-player"); icon.name: "window-duplicate"; onTriggered: root.toggleMiniPlayer() },
             Kirigami.Action { separator: true },
             Kirigami.Action { text: qsTr("Settings"); icon.name: "configure"; onTriggered: root.go("settings") }
-            , Kirigami.Action { text: root.visibility === Window.FullScreen ? qsTr("Exit Full Screen") : qsTr("Full Screen"); icon.name: root.visibility === Window.FullScreen ? "view-restore" : "view-fullscreen"; onTriggered: root.toggleFullScreen() }
         ]
     }
 
@@ -261,6 +281,7 @@ Kirigami.ApplicationWindow {
         if (AppConfig.closeToTray && trayController.available) {
             close.accepted = false
             root.hide()
+            Backend.trimMemory()
         } else {
             mini.visible = false
             Qt.quit()

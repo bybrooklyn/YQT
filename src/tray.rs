@@ -93,7 +93,7 @@ pub const TOOLTIP_MAX_CHARS: usize = 120;
 pub fn tooltip_text(title: &str, artist: &str) -> String {
     let (t, a) = (title.trim(), artist.trim());
     let full = match (t.is_empty(), a.is_empty()) {
-        (true, _) => return "YT Music".to_owned(),
+        (true, _) => return "YQT".to_owned(),
         (false, true) => t.to_owned(),
         (false, false) => format!("{t} — {a}"),
     };
@@ -151,10 +151,10 @@ mod sni {
 
     impl ksni::Tray for SniTray {
         fn id(&self) -> String {
-            "ytm".into()
+            "yqt".into()
         }
         fn title(&self) -> String {
-            "YT Music".into()
+            "YQT".into()
         }
         fn icon_pixmap(&self) -> Vec<ksni::Icon> {
             self.icons.clone()
@@ -262,7 +262,7 @@ mod sni {
             // The registered item publishes its title, tooltip and icon.
             let item = zbus::Proxy::new(&host, service.clone(), "/StatusNotifierItem", "org.kde.StatusNotifierItem").await.unwrap();
             let title: String = item.get_property("Title").await.unwrap();
-            assert_eq!(title, "YT Music");
+            assert_eq!(title, "YQT");
             let icons: Vec<(i32, i32, Vec<u8>)> = item.get_property("IconPixmap").await.unwrap();
             assert_eq!(icons.iter().map(|i| i.0).collect::<Vec<_>>(), [32, 64], "our logo at both sizes");
 
@@ -592,8 +592,8 @@ mod tests {
         assert_eq!(tooltip_text("Song", "Band"), "Song — Band");
         assert_eq!(tooltip_text("Song", ""), "Song");
         assert_eq!(tooltip_text("  Song ", "  "), "Song");
-        assert_eq!(tooltip_text("", "Band"), "YT Music");
-        assert_eq!(tooltip_text("", ""), "YT Music");
+        assert_eq!(tooltip_text("", "Band"), "YQT");
+        assert_eq!(tooltip_text("", ""), "YQT");
     }
 
     #[test]

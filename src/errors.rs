@@ -169,7 +169,7 @@ impl AppError {
     /// `detail`); the logging layer additionally redacts before it is written anywhere.
     pub fn diagnostics(&self) -> String {
         format!(
-            "ytm error {}\nkind: {:?}\nmessage: {}\nhint: {}\ndetail: {}\nversion: {}",
+            "yqt error {}\nkind: {:?}\nmessage: {}\nhint: {}\ndetail: {}\nversion: {}",
             self.id,
             self.kind,
             self.headline,

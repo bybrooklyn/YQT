@@ -111,17 +111,39 @@ pub fn resolve_user_dir(found: Option<PathBuf>, what: &str) -> Result<PathBuf, S
 /// [`resolve_user_dir`], ending the program with that message: there is no sensible way to carry on.
 pub fn user_dir_or_exit(found: Option<PathBuf>, what: &str) -> PathBuf {
     resolve_user_dir(found, what).unwrap_or_else(|msg| {
-        eprintln!("ytm: {msg}");
+        eprintln!("yqt: {msg}");
         std::process::exit(1)
     })
 }
 
 /// Per-user data (cookies, session, RustyPipe cache). `dirs` picks the right place per OS; on Linux
-/// that is `$XDG_DATA_HOME/ytm`, exactly where older versions already kept their files.
+/// that is `$XDG_DATA_HOME/yqt` (moved there from `ytm` once, by `migrate`).
 /// The directory is private (0700) and old permissions are tightened once per run.
+/// Fewer malloc arenas: glibc otherwise gives busy threads (Qt, tokio, the GPU driver) their own arena of up to
+/// 64 MB, and what is freed inside one is rarely returned. Call first thing in `main`, before any thread exists;
+/// `MALLOC_ARENA_MAX` in the environment still wins.
+pub fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        // SAFETY: plain libc call with valid constants, made while the process is still single-threaded.
+        unsafe {
+            libc::mallopt(libc::M_ARENA_MAX, 2);
+        }
+    }
+}
+
+/// Give memory freed by closed pages back to the system (glibc keeps it otherwise). Cheap; a no-op elsewhere.
+pub fn trim_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim has no preconditions.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 pub fn data_dir() -> PathBuf {
     static HARDENED: OnceLock<()> = OnceLock::new();
-    let dir = user_dir_or_exit(dirs::data_dir(), "data").join("ytm");
+    let dir = user_dir_or_exit(dirs::data_dir(), "data").join("yqt");
     let _ = ensure_private_dir(&dir);
     HARDENED.get_or_init(|| harden_tree(&dir));
     dir
@@ -177,7 +199,12 @@ pub fn st() -> &'static State {
             prune_reports(&reports, sec.report_retention_days, MAX_REPORTS, SystemTime::now());
         }
         State {
-            rt: tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime"),
+            rt: tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .max_blocking_threads(8) // covers, accent colours, downloads: a burst must not spawn dozens of threads
+                .enable_all()
+                .build()
+                .expect("tokio runtime"),
             rp: builder.build().expect("rustypipe"),
         }
     })
@@ -211,7 +238,7 @@ pub fn http() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(n.connect_timeout_secs))
             .timeout(std::time::Duration::from_secs(n.request_timeout_secs))
-            .user_agent("ytm-qt/0.1 (GPL-3.0 YouTube Music client)")
+            .user_agent("yqt/0.1 (GPL-3.0 YouTube Music client)")
             .build()
             .expect("http client")
     })

@@ -119,13 +119,13 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for RedactMaker<M> {
     }
 }
 
-/// Remove all but the newest `keep` rotated `ytm.*.log` files and tighten the rest to 0600.
+/// Remove all but the newest `keep` rotated `yqt.*.log` files and tighten the rest to 0600.
 fn tidy_logs(dir: &std::path::Path, keep: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     let mut files: Vec<_> = rd
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("ytm.") && n.to_string_lossy().ends_with(".log")))
+        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("yqt.") && n.to_string_lossy().ends_with(".log")))
         .collect();
     files.sort();
     let excess = files.len().saturating_sub(keep);
@@ -141,7 +141,7 @@ fn tidy_logs(dir: &std::path::Path, keep: usize) {
 pub fn init() {
     static GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
     let redact = crate::config::get().security.redact_logs;
-    let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,ytm=info"));
+    let filter = || EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn,yqt=info"));
 
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(RedactMaker { inner: std::io::stderr, redact })
@@ -153,7 +153,7 @@ pub fn init() {
         tidy_logs(&dir, 7);
         let appender = tracing_appender::rolling::Builder::new()
             .rotation(tracing_appender::rolling::Rotation::DAILY)
-            .filename_prefix("ytm")
+            .filename_prefix("yqt")
             .filename_suffix("log")
             .max_log_files(7)
             .build(&dir)
@@ -172,7 +172,7 @@ pub fn init() {
     };
     if ok {
         install_panic_hook(redact);
-        tracing::info!(version = env!("CARGO_PKG_VERSION"), redact, "ytm starting");
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), redact, "yqt starting");
     }
 }
 
@@ -343,11 +343,11 @@ mod tests {
     #[test]
     fn tidy_keeps_newest_seven_and_tightens() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("ytm-logs-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("yqt-logs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         for i in 1..=9 {
-            let p = d.join(format!("ytm.2026-01-0{i}.log"));
+            let p = d.join(format!("yqt.2026-01-0{i}.log"));
             std::fs::write(&p, "x").unwrap();
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
         }
@@ -356,8 +356,8 @@ mod tests {
         let mut names: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         names.sort();
         assert_eq!(names.len(), 8);
-        assert!(!names.contains(&"ytm.2026-01-01.log".to_owned()) && names.contains(&"other.txt".to_owned()));
-        let mode = std::fs::metadata(d.join("ytm.2026-01-09.log")).unwrap().permissions().mode() & 0o777;
+        assert!(!names.contains(&"yqt.2026-01-01.log".to_owned()) && names.contains(&"other.txt".to_owned()));
+        let mode = std::fs::metadata(d.join("yqt.2026-01-09.log")).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
 }

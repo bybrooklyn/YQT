@@ -1295,9 +1295,9 @@ mod tests {
 
     #[test]
     fn the_downloads_folder_defaults_into_the_data_dir() {
-        let data = Path::new("/data/ytm");
-        assert_eq!(dir_for("", data), Path::new("/data/ytm/downloads"));
-        assert_eq!(dir_for("   ", data), Path::new("/data/ytm/downloads"));
+        let data = Path::new("/data/yqt");
+        assert_eq!(dir_for("", data), Path::new("/data/yqt/downloads"));
+        assert_eq!(dir_for("   ", data), Path::new("/data/yqt/downloads"));
         assert_eq!(dir_for("/music/offline", data), Path::new("/music/offline"));
     }
 }

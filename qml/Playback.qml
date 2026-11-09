@@ -25,6 +25,8 @@ Item {
     property bool autoplay: true
     /// Optional: the track that follows `source`. With the Rust engine it is decoded ahead for gapless / crossfade.
     property url nextSource
+    /// Update `smoothPosition` every frame (karaoke lyrics) instead of every 250 ms.
+    property bool smooth: false
 
     // ---- state
     readonly property int position: _b ? _b.position : 0
@@ -65,9 +67,17 @@ Item {
         _smooth = 0
     }
 
-    // Advance the displayed position every rendered frame while playing.
+    // Advance the displayed position every rendered frame only while something needs it (`smooth`: the synced
+    // lyrics are on screen). A FrameAnimation makes the window redraw at the monitor's refresh rate, so otherwise
+    // the position is stepped four times a second, which is all a progress bar shows.
     FrameAnimation {
-        running: pb.playing
+        running: pb.playing && pb.smooth
+        onTriggered: pb._smooth = clock.positionAt(Date.now())
+    }
+    Timer {
+        interval: 250
+        repeat: true
+        running: pb.playing && !pb.smooth
         onTriggered: pb._smooth = clock.positionAt(Date.now())
     }
 

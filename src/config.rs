@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! User configuration: `<config dir>/ytm/config.toml`.
+//! User configuration: `<config dir>/yqt/config.toml`.
 //!
 //! Every tunable that used to be a literal lives here. The file is written with the defaults on
 //! first run; it is parsed leniently, so a missing key, a wrongly-typed value or even a syntax
@@ -110,6 +110,8 @@ pub struct Youtube {
     pub language: String,
     pub music_origin: String,
     pub web_remix_client_version: String,
+    /// Used to fetch the play-report tracking URL (the web client is refused by YouTube for that since Nov 2026).
+    pub android_vr_client_version: String,
     pub visionos_client_version: String,
     pub visionos_os_version: String,
     pub visionos_user_agent: String,
@@ -137,7 +139,7 @@ pub struct Integration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Audio {
-    /// "rust" (symphonia + opus-rs + cpal, no FFmpeg) or "qt" (Qt Multimedia, only if built with the `qt-media` feature).
+    /// "rust" (symphonia + opus-rs + cpal, no FFmpeg) or "qt" (Qt Multimedia, the default; no gapless, crossfade, EQ or normalisation).
     pub engine: String,
     pub eq_enabled: bool,
     /// Name of the active preset ("flat", "bass_boost", … or a user preset); informational, the bands below are what applies.
@@ -398,6 +400,7 @@ impl Default for Youtube {
             language: "en".into(),
             music_origin: "https://music.youtube.com".into(),
             web_remix_client_version: "1.20250101.01.00".into(),
+            android_vr_client_version: "1.60.19".into(),
             visionos_client_version: "1.02".into(),
             visionos_os_version: "26.5.23O471".into(),
             visionos_user_agent:
@@ -420,7 +423,7 @@ impl Default for Integration {
     }
 }
 
-const HEADER: &str = "# ytm configuration.\n# Delete a line (or the whole file) to restore its default. Invalid values are ignored with a warning on stderr.\n\n";
+const HEADER: &str = "# yqt configuration.\n# Delete a line (or the whole file) to restore its default. Invalid values are ignored with a warning on stderr.\n\n";
 
 fn kind(v: &toml::Value) -> &'static str {
     match v {
@@ -471,7 +474,7 @@ impl Config {
 }
 
 pub fn path() -> PathBuf {
-    crate::state::user_dir_or_exit(dirs::config_dir(), "config").join("ytm").join("config.toml")
+    crate::state::user_dir_or_exit(dirs::config_dir(), "config").join("yqt").join("config.toml")
 }
 
 /// The process-wide configuration (read once at first use).
@@ -487,7 +490,7 @@ pub fn get() -> &'static Config {
                 }
                 let (cfg, warnings) = Config::parse(&text);
                 for w in warnings {
-                    eprintln!("ytm: {}: {w}", path.display());
+                    eprintln!("yqt: {}: {w}", path.display());
                 }
                 cfg
             }

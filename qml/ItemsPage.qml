@@ -30,8 +30,10 @@ Kirigami.ScrollablePage {
     property var hero: null          // {description, wikipediaUrl, stats[{text}], ...}
     property var shelves: []         // [{title, style, items[]}]: albums, singles, similar artists, ...
     property var radio: null         // an artist's radio playlist
-    // Home and Explore show each of their sections as a horizontal shelf of cards instead of one long list.
-    readonly property bool shelfMode: query.length === 0 && (target === "home" || target === "explore")
+    // Home and Explore can show each of their sections as a horizontal shelf of cards. Off: they are the original
+    // sectioned list (section headers over song/album rows), which is lighter and reads like the rest of the app.
+    property bool homeAsShelves: false
+    readonly property bool shelfMode: homeAsShelves && query.length === 0 && (target === "home" || target === "explore")
     readonly property var homeShelves: {
         if (!shelfMode) return []
         const out = [], at = {}
@@ -50,6 +52,13 @@ Kirigami.ScrollablePage {
 
     // pagination
     property int pagerId: 0
+    // The Rust side keeps each list's pager (and every item fetched so far) until told to forget it.
+    property int heldPager: 0
+    onPagerIdChanged: {
+        if (heldPager > 0 && heldPager !== pagerId) Backend.dropPager(heldPager)
+        heldPager = pagerId
+    }
+    Component.onDestruction: if (pagerId > 0) Backend.dropPager(pagerId)
     property bool hasMore: false
     property bool loadingMore: false
     property int moreId: -1
@@ -59,15 +68,11 @@ Kirigami.ScrollablePage {
     property var slots: ({})
     readonly property bool progressive: target === "home" && query.length === 0
 
-    // search suggestions
-    property var suggestions: []
-    property int suggestId: -1
 
     readonly property var searchChips: [[qsTr("All"), ""], [qsTr("Songs"), "songs"], [qsTr("Albums"), "albums"], [qsTr("Artists"), "artists"], [qsTr("Playlists"), "playlists"]]
     readonly property var activeChips: query.length > 0 ? searchChips : chips
     readonly property bool authProblem: errorText.indexOf("Settings") >= 0
 
-    function focusSearch() { if (searchable) { searchField.forceActiveFocus(); searchField.selectAll() } }
     function songs() { return items.filter(i => i.kind === "song") }
     function itemAt(i) { return i >= 0 && i < items.length ? items[i] : null }
     function field(i, key) { const it = itemAt(i); return it && it[key] ? it[key] : "" }
@@ -84,9 +89,17 @@ Kirigami.ScrollablePage {
     // Searches and long (paged) lists are not cached; everything else is, per target+tab.
     function cacheKey() { return query ? "" : target + "|" + filter }
     function cacheGet() { const k = cacheKey(); return k && AppConfig.pageCacheMs > 0 ? applicationWindow().pageCache[k] : null }
+    // At most this many pages are kept; expired ones are dropped whenever a page is added.
+    readonly property int pageCacheMax: 24
     function cachePut(entry) {
         const k = cacheKey()
-        if (k && AppConfig.pageCacheMs > 0) { entry.t = Date.now(); applicationWindow().pageCache[k] = entry }
+        if (!k || AppConfig.pageCacheMs <= 0) return
+        const cache = applicationWindow().pageCache, now = Date.now()
+        for (const key in cache) if (now - cache[key].t > AppConfig.pageCacheMs) delete cache[key]
+        const keys = Object.keys(cache).filter(key => key !== k).sort((a, b) => cache[a].t - cache[b].t)
+        for (let i = 0; i < keys.length - (pageCacheMax - 1); ++i) delete cache[keys[i]]
+        entry.t = now
+        cache[k] = entry
     }
 
     function showResult(res) {
@@ -203,11 +216,6 @@ Kirigami.ScrollablePage {
                     for (const s of res.items) if (s.kind === "song") Player.enqueue(JSON.stringify(s))
                     Qt.callLater(page.maybeMore)   // feeding the queue ignores scroll position: keep going
                 }
-            } else if (id === page.suggestId && !err) {
-                const list = page.parse(json)
-                if (!list) return
-                page.suggestions = list
-                suggestPopup.visible = list.length > 0 && searchField.activeFocus
             }
         }
         function onLoggedInChanged() {
@@ -235,10 +243,74 @@ Kirigami.ScrollablePage {
 
     ListModel { id: model }
 
+    // One context menu for the whole list, pointed at a row when it opens (a menu per row made long lists slow to build).
+    function openMenu(i) { rowMenu.at = i; rowMenu.popup() }
+    QQC2.Menu {
+        id: rowMenu
+        property int at: -1
+        property string dl: "none"          // this song's download state, read each time the menu opens
+        readonly property var item: page.itemAt(at)
+        readonly property string videoId: item ? item.videoId : ""
+        property bool liked: false
+        onAboutToShow: { dl = Downloads.state(videoId); liked = Backend.isLiked(videoId) }
+        QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: Player.playNext(JSON.stringify(rowMenu.item)) }
+        QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: Player.enqueue(JSON.stringify(rowMenu.item)) }
+        QQC2.MenuItem {
+            text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+            icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+            onTriggered: {
+                if (rowMenu.dl === "failed") Downloads.retry(rowMenu.videoId)
+                else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(rowMenu.item))
+                else Downloads.remove(rowMenu.videoId)
+            }
+        }
+        QQC2.MenuSeparator { visible: Backend.loggedIn }
+        QQC2.MenuItem {
+            visible: page.field(rowMenu.at, "artistId") !== ""
+            height: visible ? implicitHeight : 0
+            text: qsTr("Go to artist")
+            icon.name: "view-media-artist"
+            onTriggered: applicationWindow().open({kind: "artist", browseId: page.field(rowMenu.at, "artistId"), title: page.field(rowMenu.at, "artist")})
+        }
+        QQC2.MenuItem {
+            visible: page.field(rowMenu.at, "albumId") !== ""
+            height: visible ? implicitHeight : 0
+            text: qsTr("Go to album")
+            icon.name: "media-optical-audio"
+            onTriggered: applicationWindow().open({kind: "album", browseId: page.field(rowMenu.at, "albumId"), title: page.field(rowMenu.at, "title")})
+        }
+        QQC2.MenuItem {
+            visible: Backend.loggedIn
+            height: visible ? implicitHeight : 0
+            text: rowMenu.liked ? qsTr("Remove from liked music") : qsTr("Like")
+            icon.name: rowMenu.liked ? "starred-symbolic" : "non-starred-symbolic"
+            onTriggered: Backend.setLiked(rowMenu.videoId, !rowMenu.liked)
+        }
+        QQC2.MenuItem {
+            visible: Backend.loggedIn
+            height: visible ? implicitHeight : 0
+            text: qsTr("Add to playlist…")
+            icon.name: "list-add"
+            onTriggered: applicationWindow().addToPlaylist(rowMenu.item)
+        }
+    }
+
     // One shelf: a heading and a horizontal row of cards (round for artists).
     component ShelfRow: ColumnLayout {
         id: shelf
-        required property var modelData
+        required property int index
+        // The shelf at this position. Rows arrive one at a time on Home, so `allShelves` is rebuilt often; the cards are
+        // only handed a new list when this shelf's own content changed, so the other shelves are not rebuilt and flicker.
+        readonly property var modelData: page.allShelves[index] || ({title: "", items: []})
+        property var cards: []
+        property string signature: ""
+        function refresh() {
+            const its = modelData.items
+            const sig = its.length + "|" + its.map(i => i.videoId || i.browseId || i.title).join(",")
+            if (sig !== signature) { signature = sig; cards = its }
+        }
+        onModelDataChanged: refresh()
+        Component.onCompleted: refresh()
         Layout.fillWidth: true
         spacing: 0
         Kirigami.Heading {
@@ -256,7 +328,7 @@ Kirigami.ScrollablePage {
             spacing: Kirigami.Units.smallSpacing
             leftMargin: Kirigami.Units.smallSpacing
             rightMargin: Kirigami.Units.smallSpacing
-            model: shelf.modelData.items
+            model: shelf.cards
             QQC2.ScrollBar.horizontal: QQC2.ScrollBar {}
             delegate: QQC2.ItemDelegate {
                 id: card
@@ -299,66 +371,30 @@ Kirigami.ScrollablePage {
     }
 
     header: ColumnLayout {
-        visible: page.searchable || page.activeChips.length > 0
+        visible: page.activeChips.length > 0
         spacing: 0
 
-        Kirigami.SearchField {
-            id: searchField
-            visible: page.searchable
+        // Only built when there are filters: the desktop style's TabBar reads its first tab's height and complains with none.
+        Loader {
             Layout.fillWidth: true
-            Layout.margins: Kirigami.Units.smallSpacing
-            placeholderText: qsTr("Search songs, albums, artists…")
-            autoAccept: false
-            Component.onCompleted: text = page.query
-            onAccepted: {
-                suggestPopup.close()
-                if (text.trim() !== page.query) applicationWindow().search(text)
-            }
-            onTextEdited: suggestTimer.restart()
-            onActiveFocusChanged: if (!activeFocus) suggestPopup.close()
-
-            Timer {
-                id: suggestTimer
-                interval: AppConfig.suggestDebounceMs
-                onTriggered: {
-                    if (searchField.text.trim().length > 1) page.suggestId = Backend.suggest(searchField.text.trim())
-                    else suggestPopup.close()
+            active: page.activeChips.length > 0
+            visible: active
+            sourceComponent: QQC2.TabBar {
+                currentIndex: {
+                    for (let i = 0; i < page.activeChips.length; ++i)
+                        if (page.activeChips[i][1] === page.filter) return i
+                    return 0
                 }
-            }
-
-            QQC2.Popup {
-                id: suggestPopup
-                y: searchField.height
-                width: searchField.width
-                padding: 0
-                focus: false
-                closePolicy: QQC2.Popup.CloseOnEscape
-                contentItem: ListView {
-                    implicitHeight: Math.min(contentHeight, Kirigami.Units.gridUnit * 14)
-                    model: page.suggestions
-                    clip: true
-                    delegate: QQC2.ItemDelegate {
-                        required property string modelData
-                        width: ListView.view.width
-                        text: modelData
-                        icon.name: "search"
-                        onClicked: { suggestPopup.close(); searchField.text = modelData; applicationWindow().search(modelData) }
+                onCurrentIndexChanged: {
+                    const c = page.activeChips[currentIndex]
+                    if (c && c[1] !== page.filter) page.filter = c[1]
+                }
+                Repeater {
+                    model: page.activeChips
+                    QQC2.TabButton {
+                        required property var modelData
+                        text: modelData[0]
                     }
-                }
-            }
-        }
-        RowLayout {
-            visible: page.activeChips.length > 0
-            Layout.margins: Kirigami.Units.smallSpacing
-            Repeater {
-                model: page.activeChips
-                QQC2.ToolButton {
-                    required property var modelData
-                    text: modelData[0]
-                    checkable: true
-                    autoExclusive: true
-                    checked: page.filter === modelData[1]
-                    onClicked: page.filter = modelData[1]
                 }
             }
         }
@@ -476,7 +512,7 @@ Kirigami.ScrollablePage {
 
           // Home's and Explore's sections as shelves of cards (an artist's shelves come after its songs, in the footer).
           Repeater {
-            model: page.shelfMode ? page.allShelves : []
+            model: page.shelfMode ? page.allShelves.length : 0
             delegate: ShelfRow {}
           }
         }
@@ -486,7 +522,7 @@ Kirigami.ScrollablePage {
             spacing: Kirigami.Units.largeSpacing
             // an artist's albums, singles, playlists and similar artists, below the top songs
             Repeater {
-                model: page.shelfMode ? [] : page.shelves
+                model: page.shelfMode ? 0 : page.shelves.length
                 delegate: ShelfRow {}
             }
             Item {
@@ -515,58 +551,12 @@ Kirigami.ScrollablePage {
             required property string thumbnail
             required property string duration
 
-            readonly property bool liked: { Backend.likedRev; return Backend.isLiked(videoId) }
+            readonly property bool liked: kind === "song" && Backend.loggedIn && (Backend.likedRev, Backend.isLiked(videoId))
 
             width: ListView.view.width
             highlighted: kind === "song" && Player.hasTrack && Player.videoId === videoId
             onClicked: page.activate(index)
-            TapHandler { acceptedButtons: Qt.RightButton; enabled: row.kind === "song"; onTapped: rowMenu.popup() }
-
-            QQC2.Menu {
-                id: rowMenu
-                property string dl: "none"          // this song's download state, read each time the menu opens
-                onAboutToShow: dl = Downloads.state(row.videoId)
-                QQC2.MenuItem { text: qsTr("Play next"); icon.name: "media-skip-forward"; onTriggered: Player.playNext(JSON.stringify(page.itemAt(row.index))) }
-                QQC2.MenuItem { text: qsTr("Add to queue"); icon.name: "media-playlist-append"; onTriggered: Player.enqueue(JSON.stringify(page.itemAt(row.index))) }
-                QQC2.MenuItem {
-                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
-                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
-                    onTriggered: {
-                        if (rowMenu.dl === "failed") Downloads.retry(row.videoId)
-                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(page.itemAt(row.index)))
-                        else Downloads.remove(row.videoId)
-                    }
-                }
-                QQC2.MenuSeparator { visible: Backend.loggedIn }
-                QQC2.MenuItem {
-                    visible: page.field(row.index, "artistId") !== ""
-                    height: visible ? implicitHeight : 0
-                    text: qsTr("Go to artist")
-                    icon.name: "view-media-artist"
-                    onTriggered: applicationWindow().open({kind: "artist", browseId: page.field(row.index, "artistId"), title: page.field(row.index, "artist")})
-                }
-                QQC2.MenuItem {
-                    visible: page.field(row.index, "albumId") !== ""
-                    height: visible ? implicitHeight : 0
-                    text: qsTr("Go to album")
-                    icon.name: "media-optical-audio"
-                    onTriggered: applicationWindow().open({kind: "album", browseId: page.field(row.index, "albumId"), title: page.field(row.index, "title")})
-                }
-                QQC2.MenuItem {
-                    visible: Backend.loggedIn
-                    height: visible ? implicitHeight : 0
-                    text: row.liked ? qsTr("Remove from liked music") : qsTr("Like")
-                    icon.name: row.liked ? "starred-symbolic" : "non-starred-symbolic"
-                    onTriggered: Backend.setLiked(row.videoId, !row.liked)
-                }
-                QQC2.MenuItem {
-                    visible: Backend.loggedIn
-                    height: visible ? implicitHeight : 0
-                    text: qsTr("Add to playlist…")
-                    icon.name: "list-add"
-                    onTriggered: applicationWindow().addToPlaylist(page.itemAt(row.index))
-                }
-            }
+            TapHandler { acceptedButtons: Qt.RightButton; enabled: row.kind === "song"; onTapped: page.openMenu(row.index) }
 
             contentItem: RowLayout {
                 spacing: Kirigami.Units.largeSpacing
@@ -604,7 +594,7 @@ Kirigami.ScrollablePage {
                     text: qsTr("More")
                     QQC2.ToolTip.visible: hovered
                     QQC2.ToolTip.text: text
-                    onClicked: rowMenu.popup()
+                    onClicked: page.openMenu(row.index)
                 }
             }
         }

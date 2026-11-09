@@ -4117,7 +4117,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ytm"
+name = "yqt"
 version = "0.1.0"
 dependencies = [
  "aes 0.9.4",
@@ -4137,6 +4137,7 @@ dependencies = [
  "fs4",
  "image",
  "ksni",
+ "libc",
  "opus-rs",
  "plist",
  "rand 0.9.5",

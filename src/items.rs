@@ -38,6 +38,18 @@ pub fn fmt_dur(s: u32) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+/// Inverse of [`fmt_dur`] for the `m:ss` strings in queue items; 0 when unknown. Mirrors `seconds()` in
+/// NowPlayingPage.qml so a prefetch and the page produce the same lyrics cache key.
+pub fn parse_dur(s: &str) -> u32 {
+    match s.split_once(':') {
+        Some((m, sec)) => match (m.trim().parse::<u32>(), sec.trim().parse::<u32>()) {
+            (Ok(m), Ok(sec)) => m * 60 + sec,
+            _ => 0,
+        },
+        None => 0,
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // flat JSON record: the fields are the schema the QML expects
 fn item(
     title: &str,

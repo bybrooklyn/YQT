@@ -181,18 +181,18 @@ pub static META: &[Meta] = &[
         "audio",
         Choice,
         "Audio engine",
-        "The built-in Rust engine needs no FFmpeg. Qt Multimedia is only available if this build includes it.",
+        "Qt Multimedia is the default. The built-in Rust engine is needed for gapless playback, crossfade, loudness normalisation, the equalizer and choosing an output device.",
     )
     .choices(&[("rust", "Built-in (Rust)"), ("qt", "Qt Multimedia")])
     .restart(),
-    b("audio.gapless", "audio", "Gapless playback", "Start the next track without a gap."),
-    n("audio.crossfade_ms", "audio", "Crossfade", "Overlap the end of a track with the start of the next one. 0 turns it off.")
+    b("audio.gapless", "audio", "Gapless playback", "Start the next track without a gap. Needs the built-in (Rust) audio engine."),
+    n("audio.crossfade_ms", "audio", "Crossfade", "Overlap the end of a track with the start of the next one. 0 turns it off. Needs the built-in (Rust) audio engine.")
         .range(0.0, 12000.0)
         .step(250.0)
         .unit("ms")
         .slider(),
-    b("audio.normalize", "audio", "Normalise loudness", "Even out volume differences between tracks using YouTube's loudness data."),
-    t("audio.output_device", "audio", "Output device", "Name of the audio output; empty uses the system default.").restart(),
+    b("audio.normalize", "audio", "Normalise loudness", "Even out volume differences between tracks using YouTube's loudness data. Needs the built-in (Rust) audio engine."),
+    t("audio.output_device", "audio", "Output device", "Name of the audio output; empty uses the system default. Needs the built-in (Rust) audio engine.").restart(),
     f("playback.default_volume", "audio", "Starting volume", "Volume used on first start.").range(0.0, 1.0).step(0.05).slider(),
     b("playback.prefetch_next", "audio", "Prepare the next song", "Resolve the next queue entry in the background so skipping is instant."),
     b("playback.autoplay_radio", "audio", "Keep playing when the queue ends", "Continue with YouTube's radio for the last song."),
@@ -398,6 +398,7 @@ pub static META: &[Meta] = &[
     // ---- YouTube client identities ----
     t("youtube.language", "client", "Language", "Language code sent to YouTube (for example en, de, ja).").adv(),
     Meta::new("youtube.music_origin", "client", Url, "YouTube Music address", "Must be https.").adv(),
+    t("youtube.android_vr_client_version", "client", "Play-report client version", "Client version used to record plays on YouTube. Goes stale when YouTube changes things; edit instead of rebuilding.").adv(),
     t("youtube.web_remix_client_version", "client", "Web client version", "Goes stale when YouTube changes things; edit instead of rebuilding.").adv(),
     t("youtube.visionos_client_version", "client", "visionOS client version", "Version of the client identity used for streams.").restart().adv(),
     t("youtube.visionos_os_version", "client", "visionOS version", "OS version of the client identity used for streams.").restart().adv(),

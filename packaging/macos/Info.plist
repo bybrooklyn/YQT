@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>ytm</string>
+    <key>CFBundleName</key><string>YQT</string>
     <key>CFBundleDisplayName</key><string>YT Music</string>
-    <key>CFBundleIdentifier</key><string>org.kde.ytm</string>
-    <key>CFBundleExecutable</key><string>ytm</string>
+    <key>CFBundleIdentifier</key><string>org.kde.yqt</string>
+    <key>CFBundleExecutable</key><string>yqt</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>0.1.0</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>

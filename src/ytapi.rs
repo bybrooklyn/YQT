@@ -128,10 +128,41 @@ pub fn is_trusted_youtube_url(url: &str) -> bool {
     ["youtube.com", "google.com"].iter().any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
-/// Ask YouTube (signed in, WEB_REMIX) for the playback-tracking URL of a video. The URL is
-/// validated; an untrusted one is an error, so cookies are never sent anywhere unexpected.
+/// Ask YouTube (signed in) for the playback-tracking URL of a video. The URL is validated; an untrusted one is an
+/// error, so cookies are never sent anywhere unexpected.
+///
+/// Uses the ANDROID_VR client: since early November 2026 YouTube answers the WEB_REMIX `/player` call with
+/// "Video unavailable" (no streaming data, no tracking), while ANDROID_VR still answers signed-in with both.
 pub async fn player_tracking_url(video_id: &str) -> Result<String, String> {
-    let v = post("player", json!({"videoId": video_id, "racyCheckOk": true, "contentCheckOk": true})).await?;
+    let origin = "https://www.youtube.com";
+    let cookie = stored_cookie().ok_or(AUTH_MSG)?;
+    let sapisid = cookie_value(&cookie, "SAPISID").or_else(|| cookie_value(&cookie, "__Secure-3PAPISID")).ok_or(AUTH_MSG)?;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
+    let (name, version) = (ANDROID_VR_NAME, &crate::config::current().youtube.android_vr_client_version);
+    let body = json!({
+        "context": {"client": {
+            "clientName": name, "clientVersion": version, "hl": crate::config::current().youtube.language,
+            "androidSdkVersion": 32, "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L"
+        }},
+        "videoId": video_id, "racyCheckOk": true, "contentCheckOk": true
+    });
+    let resp = http()
+        .post(format!("{origin}/youtubei/v1/player?prettyPrint=false"))
+        .header("Cookie", &cookie)
+        .header("Authorization", sapisid_hash(sapisid, ts, origin))
+        .header("Origin", origin)
+        .header("X-Origin", origin)
+        .header("X-Goog-AuthUser", "0")
+        .header("X-YouTube-Client-Name", "28")
+        .header("X-YouTube-Client-Version", version.as_str())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.without_url().to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("YouTube returned HTTP {}", resp.status().as_u16()));
+    }
+    let v: Value = serde_json::from_slice(&crate::state::read_limited(resp, crate::state::MAX_API_BODY).await?).map_err(|e| e.to_string())?;
     let url = extract_tracking_url(&v).ok_or("YouTube returned no playback-tracking URL")?;
     if is_trusted_youtube_url(&url) {
         Ok(url)
@@ -139,6 +170,8 @@ pub async fn player_tracking_url(video_id: &str) -> Result<String, String> {
         Err("YouTube returned an unexpected playback-tracking host".into())
     }
 }
+
+const ANDROID_VR_NAME: &str = "ANDROID_VR";
 
 pub async fn rate(video_id: &str, like: bool) -> Result<(), String> {
     post(if like { "like/like" } else { "like/removelike" }, json!({"target": {"videoId": video_id}})).await?;
@@ -269,3 +302,16 @@ mod tests {
         assert_eq!(cookie_value("a=1", "SAPISID"), None);
     }
 }
+
+
+#[cfg(test)]
+mod live_tracking {
+    /// Live, signed in: only checks that a tracking URL comes back (does NOT send the play report).
+    #[tokio::test]
+    #[ignore]
+    async fn tracking_url_comes_back() {
+        let url = super::player_tracking_url("dQw4w9WgXcQ").await.expect("tracking url");
+        println!("RES tracking host ok: {}", super::is_trusted_youtube_url(&url));
+    }
+}
+

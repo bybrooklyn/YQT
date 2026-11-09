@@ -1,6 +1,6 @@
-<p align="center"><img src="assets/banner.svg" alt="ytm: a native YouTube Music client" width="100%"></p>
+<p align="center"><img src="assets/banner.svg" alt="YQT: a native YouTube Music client" width="100%"></p>
 
-# ytm
+# YQT
 
 A native YouTube Music client written in **Rust**, **Qt 6** ([cxx-qt](https://github.com/KDAB/cxx-qt)) and **Kirigami**.
 No browser engine, no Electron, no FFmpeg, no system OpenSSL: networking is rustls and the optional audio engine is pure Rust.
@@ -33,16 +33,42 @@ It looks and behaves like a normal KDE application: standard Kirigami and Breeze
 
 ## Build and run
 
+You need [just](https://just.systems), Rust, Qt 6 (base, declarative, multimedia) and Kirigami with qqc2-desktop-style, which together give the KDE look.
+
+### Linux
+
+Install Qt 6, Kirigami and qqc2-desktop-style from your distro (on Debian/Ubuntu: `qt6-base-dev qt6-declarative-dev qt6-multimedia-dev libkf6kirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-qqc2-desktop-style`; ALSA is needed for the Rust audio engine), then:
+
 ```sh
-just run        # or: cargo run
-just check      # fmt + clippy + tests
-just deny       # licences, advisories, bans (OpenSSL is banned)
-just live       # live checks against YouTube / LRCLIB (network)
-just            # list all recipes
+just run          # debug build and run
+just check        # fmt + clippy + tests
+just install      # ~/.local/bin + desktop entry
+just              # list every recipe
 ```
 
-Needs Rust, Qt 6 (base, declarative, and multimedia for the default player), Kirigami and, on Linux, qqc2-desktop-style and ALSA (for the Rust audio engine).
-Kirigami on Windows and macOS comes from [KDE Craft](https://community.kde.org/Craft).
+### Windows (experimental)
+
+Qt and Kirigami come from [KDE Craft](https://community.kde.org/Craft), so the app looks like it does on Plasma: same Kirigami and Breeze controls, same icons. In PowerShell:
+
+```powershell
+winget install Casey.Just
+just win-setup        # Rust, MSVC Build Tools, Craft + Qt 6 + Kirigami (one-time; long)
+just win-doctor       # checks the toolchain and the QML modules
+just win-build        # release build against Craft's Qt
+just package-windows  # dist\YQT-windows\ and a .zip, with Qt, Kirigami and Breeze icons bundled
+```
+
+From Linux you can cross-compile the exe instead (needs `cargo-xwin`, `clang-cl`, `lld` and `pipx`): `just win-cross-qt` once (downloads Windows Qt 6.10 and matching host tools into `.cross/`), then `just win-cross` gives `target/x86_64-pc-windows-msvc/release/yqt.exe`. That is a compile-and-link check only; running it still needs Qt and Kirigami DLLs next to it.
+
+Craft is expected in `C:\CraftRoot`; set `YTM_QT_ROOT` if yours is elsewhere. The scripts are in `packaging/windows/`.
+
+### macOS (experimental)
+
+Install Qt 6 and Kirigami through Craft, then `just package-macos` builds a `.app` with `macdeployqt`.
+
+### Other recipes
+
+`just deny` (licences, advisories; OpenSSL is banned), `just live` (live checks against YouTube and LRCLIB, needs network), `just config` (where `config.toml` lives).
 
 ## How it works
 
@@ -63,15 +89,16 @@ See [SECURITY.md](SECURITY.md) for the threat model. In short: your cookies stay
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
-| Builds & runs | ✅ developed and tested here | ⚠️ not built | ⚠️ not built |
+| Builds and runs | ✅ developed and tested | ⚠️ not built yet | ⚠️ not built yet |
+| Look | Kirigami + Breeze, follows Plasma | same (`org.kde.desktop`, Fusion only if missing) | same (`org.kde.desktop`, Fusion only if missing) |
 | Sign-in: paste cookies | ✅ | ✅ | ✅ |
 | Sign-in: Firefox-family import | ✅ | ✅ (logic tested) | ✅ (logic tested) |
-| Sign-in: Chromium-family import | ✅ KWallet / libsecret | ✅ Keychain (logic tested) | ⚠️ DPAPI + AES-GCM; **not** Chrome/Edge/Brave 127+ (app-bound encryption; paste cookies or use Firefox); close the browser first |
-| Media keys (MPRIS) | ✅ | ❌ not implemented | ❌ not implemented |
-| Packaging | `just install` | `just package-macos` (experimental) | `just package-windows` (experimental) |
+| Sign-in: Chromium-family import | ✅ KWallet / libsecret | ✅ Keychain (logic tested) | ⚠️ DPAPI + AES-GCM; not Chrome/Edge/Brave 127+ (app-bound encryption), so paste cookies or use Firefox; close the browser first |
+| System tray, media keys | ✅ tray (StatusNotifierItem) and MPRIS | ❌ not implemented | ❌ not implemented |
+| Packaging | `just install` | `just package-macos` | `just package-windows` |
 
-"Logic tested" means path discovery, key derivation and decryption are unit-tested with synthetic data on Linux, and the sign-in code is type-checked for
-`x86_64-pc-windows-{msvc,gnu}` and `aarch64-apple-darwin`. The real macOS Keychain and Windows DPAPI calls, the Qt/Kirigami build on those systems and their CI jobs have **not** been run.
+"Logic tested" means path discovery, key derivation and decryption are unit-tested with synthetic data, and the sign-in code is type-checked for `x86_64-pc-windows-{msvc,gnu}` and `aarch64-apple-darwin` (`just check-platforms`).
+The real Keychain and DPAPI calls and the Qt/Kirigami build on macOS and Windows have **not** been run.
 
 ## Known gaps
 

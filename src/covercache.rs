@@ -2,7 +2,7 @@
 //! Cover cache: fetch album art once, keep it on disk, serve it from the local proxy
 //! (`/t/<token>/cover/<hash>`). Covers then load faster and keep working offline.
 //!
-//! * files live in `<cache dir>/ytm/covers/<sha1 of the URL>` (private permissions), size-capped with an LRU
+//! * files live in `<cache dir>/yqt/covers/<sha1 of the URL>` (private permissions), size-capped with an LRU
 //!   (the file's modification time is its last use);
 //! * only `https` URLs on a real host name are fetched (no IP literals, no `localhost`), responses are capped
 //!   at 8 MB and must decode as a JPEG / PNG / WebP image;
@@ -243,7 +243,7 @@ pub async fn fetch_into(cache: &Cache, client: &reqwest::Client, url: &str) -> R
 pub fn global() -> &'static Cache {
     static C: OnceLock<Cache> = OnceLock::new();
     C.get_or_init(|| {
-        let dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("ytm").join("covers");
+        let dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("yqt").join("covers");
         Cache::new(dir, DEFAULT_CAP_BYTES)
     })
 }
@@ -265,7 +265,7 @@ fn client() -> &'static reqwest::Client {
             .redirect(policy)
             .connect_timeout(Duration::from_secs(n.connect_timeout_secs))
             .timeout(Duration::from_secs(n.request_timeout_secs))
-            .user_agent("ytm-qt/0.1 (GPL-3.0 YouTube Music client)")
+            .user_agent("yqt/0.1 (GPL-3.0 YouTube Music client)")
             .build()
             .expect("cover http client")
     })

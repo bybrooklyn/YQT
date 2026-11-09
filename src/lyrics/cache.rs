@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! Lyrics cache: a short-lived in-memory map and `<cache dir>/ytm/lyrics/<hash>.json` on disk.
+//! Lyrics cache: a short-lived in-memory map and `<cache dir>/yqt/lyrics/<hash>.json` on disk.
 //!
 //! Only found lyrics go to disk (a "nobody has it" answer may change, so it is only remembered for a few
 //! minutes in memory); failures are never cached. Files are private (0600 in a 0700 folder).
@@ -36,9 +36,9 @@ pub fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// `<cache dir>/ytm/lyrics`.
+/// `<cache dir>/yqt/lyrics`.
 pub fn default_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("ytm").join("lyrics"))
+    dirs::cache_dir().map(|d| d.join("yqt").join("lyrics"))
 }
 
 #[derive(Serialize, Deserialize)]

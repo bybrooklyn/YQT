@@ -1,6 +1,6 @@
 # Security
 
-ytm is a local desktop app that signs in to YouTube Music with browser cookies, plays audio through a
+YQT is a local desktop app that signs in to YouTube Music with browser cookies, plays audio through a
 localhost proxy, and talks to a few third-party services (lyrics). This page records the threat model,
 what was found in the audit, what was fixed, and what is still a risk.
 
@@ -9,7 +9,7 @@ what was found in the audit, what was fixed, and what is still a risk.
 Please do not open a public issue for security problems. Use GitHub's private "Report a vulnerability"
 (Security tab) on the project repository, or email the maintainer listed in the repository profile.
 Include the version, OS, and steps to reproduce. Never include real cookies or tokens; redact them
-(`ytm`'s log files are already redacted by default, see below).
+(`YQT`'s log files are already redacted by default, see below).
 
 ## Threat model
 

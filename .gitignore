@@ -18,3 +18,4 @@ rustypipe_cache.json
 rustypipe_reports/
 cookies.txt
 .env
+/.cross/

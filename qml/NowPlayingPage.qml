@@ -62,6 +62,41 @@ Kirigami.Page {
         }
     }
 
+
+    // One context menu for the whole queue, filled in for the row it was opened on.
+    function openMenu(index, song) { rowMenu.row = index; rowMenu.song = song; rowMenu.popup() }
+    QQC2.Menu {
+        id: rowMenu
+        property int row: -1
+        property var song: ({})
+        property string dl: "none"
+        property bool liked: false
+        onAboutToShow: { dl = Downloads.state(song.videoId); liked = Backend.isLiked(song.videoId) }
+        QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: Player.playIndex(rowMenu.row) }
+        QQC2.MenuItem {
+            text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
+            icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
+            onTriggered: {
+                if (rowMenu.dl === "failed") Downloads.retry(rowMenu.song.videoId)
+                else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(rowMenu.song))
+                else Downloads.remove(rowMenu.song.videoId)
+            }
+        }
+        QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: rowMenu.row !== Player.index; onTriggered: QueueModel.playRowNext(rowMenu.row) }
+        QQC2.MenuSeparator {}
+        QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: !!rowMenu.song.artistId; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: rowMenu.song.artistId, title: rowMenu.song.artist}) }
+        QQC2.MenuItem { icon.name: "media-optical-audio"; text: qsTr("Go to album"); visible: !!rowMenu.song.albumId; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "album", browseId: rowMenu.song.albumId, title: rowMenu.song.title}) }
+        QQC2.MenuItem {
+            visible: Backend.loggedIn; height: visible ? implicitHeight : 0
+            icon.name: rowMenu.liked ? "starred-symbolic" : "non-starred-symbolic"
+            text: rowMenu.liked ? qsTr("Remove from liked music") : qsTr("Like")
+            onTriggered: Backend.setLiked(rowMenu.song.videoId, !rowMenu.liked)
+        }
+        QQC2.MenuItem { icon.name: "list-add"; text: qsTr("Add to playlist…"); visible: Backend.loggedIn; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().addToPlaylist({videoId: rowMenu.song.videoId, title: rowMenu.song.title}) }
+        QQC2.MenuSeparator {}
+        QQC2.MenuItem { icon.name: "list-remove"; text: qsTr("Remove from queue"); onTriggered: QueueModel.removeRow(rowMenu.row) }
+    }
+
     GridLayout {
         anchors.fill: parent
         columns: page.wide ? 2 : 1
@@ -199,41 +234,11 @@ Kirigami.Page {
                                 QQC2.Label { text: slot.duration; opacity: 0.7 }
                                 QQC2.ToolButton {
                                     icon.name: "overflow-menu"; display: QQC2.AbstractButton.IconOnly; text: qsTr("More")
-                                    onClicked: rowMenu.popup()
+                                    onClicked: page.openMenu(slot.index, slot.song)
                                 }
                             }
                             // Right-click opens the same menu as the ⋮ button.
-                            TapHandler { acceptedButtons: Qt.RightButton; onTapped: rowMenu.popup() }
-
-                            QQC2.Menu {
-                                id: rowMenu
-                                property string dl: "none"
-                                onAboutToShow: dl = Downloads.state(slot.videoId)
-                                QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: Player.playIndex(slot.index) }
-                                QQC2.MenuItem {
-                                    text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
-                                    icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
-                                    onTriggered: {
-                                        if (rowMenu.dl === "failed") Downloads.retry(slot.videoId)
-                                        else if (rowMenu.dl === "none") Downloads.download(JSON.stringify(slot.song))
-                                        else Downloads.remove(slot.videoId)
-                                    }
-                                }
-                                QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: slot.index !== Player.index; onTriggered: QueueModel.playRowNext(slot.index) }
-                                QQC2.MenuSeparator {}
-                                QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: slot.artistId.length > 0; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: slot.artistId, title: slot.artist}) }
-                                QQC2.MenuItem { icon.name: "media-optical-audio"; text: qsTr("Go to album"); visible: slot.albumId.length > 0; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "album", browseId: slot.albumId, title: slot.title}) }
-                                QQC2.MenuItem {
-                                    readonly property bool liked: { Backend.likedRev; return Backend.isLiked(slot.videoId) }
-                                    visible: Backend.loggedIn; height: visible ? implicitHeight : 0
-                                    icon.name: liked ? "starred-symbolic" : "non-starred-symbolic"
-                                    text: liked ? qsTr("Remove from liked music") : qsTr("Like")
-                                    onTriggered: Backend.setLiked(slot.videoId, !liked)
-                                }
-                                QQC2.MenuItem { icon.name: "list-add"; text: qsTr("Add to playlist…"); visible: Backend.loggedIn; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().addToPlaylist({videoId: slot.videoId, title: slot.title}) }
-                                QQC2.MenuSeparator {}
-                                QQC2.MenuItem { icon.name: "list-remove"; text: qsTr("Remove from queue"); onTriggered: QueueModel.removeRow(slot.index) }
-                            }
+                            TapHandler { acceptedButtons: Qt.RightButton; onTapped: page.openMenu(slot.index, slot.song) }
                         }
                     }
 
@@ -325,12 +330,13 @@ Kirigami.Page {
                             width: ListView.view.width
                             implicitHeight: label.implicitHeight + Kirigami.Units.largeSpacing * 1.5
 
-                            // How far through its own line the song is (0..1): the karaoke fill.
+                            // How far through its own line the song is (0..1): the karaoke fill. It runs over the time the
+                            // line is actually sung (`fillMs`, estimated in Rust), not all the way to the next line's start.
                             readonly property real progress: {
                                 if (!active) return 0
                                 const t0 = modelData[0]
-                                const next = lineItem.index + 1 < page.synced.length ? page.synced[lineItem.index + 1][0] : t0 + 4000
-                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / Math.max(1, next - t0)))
+                                const span = modelData.length > 4 ? modelData[4] : Math.max(1, modelData[2] - t0)
+                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / Math.max(1, span)))
                             }
 
                             QQC2.Label {

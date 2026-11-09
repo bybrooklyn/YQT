@@ -9,6 +9,7 @@ fn main() {
         "qml/QtPlayback.qml",
         "qml/CoverImage.qml",
         "qml/ItemsPage.qml",
+        "qml/SearchBar.qml",
         "qml/NowPlayingBar.qml",
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
@@ -17,6 +18,7 @@ fn main() {
         "qml/MiniPlayer.qml",
         "qml/TrayController.qml",
     ]))
+    .qrc("assets/yqt.qrc")
     .qt_module("Quick")
     .qt_module("Qml")
     .files([

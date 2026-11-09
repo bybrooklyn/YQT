@@ -48,6 +48,12 @@ pub mod qobject {
         /// Next page for a list whose first answer carried a `pager` id.
         #[qinvokable]
         fn more(self: Pin<&mut Backend>, pager: i32) -> i32;
+        /// Forget a list's pager (the page showing it went away), freeing the items it holds.
+        #[qinvokable]
+        fn drop_pager(self: &Backend, pager: i32);
+        /// Hand memory freed by closed pages back to the system.
+        #[qinvokable]
+        fn trim_memory(self: &Backend);
         /// Lyrics for a track: `{synced: [[ms, line], ...], plain, source}`; "Lyrics unavailable" when nobody has them.
         #[qinvokable]
         fn lyrics(self: Pin<&mut Backend>, video_id: &QString, title: &QString, artist: &QString, seconds: i32) -> i32;
@@ -272,6 +278,23 @@ fn liked_row_first(items: &mut Vec<Value>) {
 
 static PAGERS: Mutex<Option<HashMap<i32, (Pager, bool)>>> = Mutex::new(None);
 static NEXT_PAGER: AtomicI32 = AtomicI32::new(0);
+/// Pages normally drop their pager when they close; this bounds the ones that never do (e.g. a `more()` still in
+/// flight when its page closed puts the pager back afterwards). Ids only grow, so the smallest is the oldest.
+const MAX_PAGERS: usize = 16;
+
+fn keep_pager(key: i32, entry: (Pager, bool)) {
+    let mut guard = PAGERS.lock().unwrap();
+    let map = guard.get_or_insert_default();
+    map.insert(key, entry);
+    while map.len() > MAX_PAGERS {
+        let Some(&oldest) = map.keys().min() else { break };
+        map.remove(&oldest);
+    }
+}
+
+pub(crate) fn drop_pager(key: i32) {
+    PAGERS.lock().unwrap().get_or_insert_default().remove(&key);
+}
 
 /// A page whose list can continue: remembers the pager and tells QML its id.
 fn paged(title: &str, subtitle: &str, thumbnail: &str, pager: Pager, auth: bool) -> Value {
@@ -279,7 +302,7 @@ fn paged(title: &str, subtitle: &str, thumbnail: &str, pager: Pager, auth: bool)
     let more = pager.has_more();
     if more {
         let id = NEXT_PAGER.fetch_add(1, Ordering::Relaxed) + 1;
-        PAGERS.lock().unwrap().get_or_insert_default().insert(id, (pager, auth));
+        keep_pager(id, (pager, auth));
         v["pager"] = json!(id);
     }
     v["more"] = json!(more);
@@ -291,13 +314,13 @@ pub(crate) async fn more(key: i32) -> Res {
     let from = pager.len();
     let q = if auth { authed() } else { st().rp.query() };
     if let Err(e) = pager.extend(&q).await {
-        PAGERS.lock().unwrap().get_or_insert_default().insert(key, (pager, auth)); // allow a retry
+        keep_pager(key, (pager, auth)); // allow a retry
         return Err(err(e));
     }
     let items = clean_all(pager.items(from));
     let more = pager.has_more();
     if more {
-        PAGERS.lock().unwrap().get_or_insert_default().insert(key, (pager, auth));
+        keep_pager(key, (pager, auth));
     }
     Ok(json!({"items": items, "more": more, "pager": key}))
 }
@@ -709,6 +732,12 @@ impl qobject::Backend {
     }
     fn is_liked(&self, video_id: &QString) -> bool {
         liked_set(|s| s.contains(&video_id.to_string()))
+    }
+    fn drop_pager(&self, pager: i32) {
+        drop_pager(pager);
+    }
+    fn trim_memory(&self) {
+        crate::state::trim_memory();
     }
     fn set_liked(mut self: Pin<&mut Self>, video_id: &QString, liked: bool) -> i32 {
         let vid = video_id.to_string();

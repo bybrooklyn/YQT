@@ -29,6 +29,8 @@ use std::time::Duration;
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 /// How long one provider may take before we go on without it.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(12);
+/// Pause before the single retry of a provider that hit a network error.
+const RETRY_DELAY: Duration = Duration::from_millis(400);
 
 /// The typed answer for the UI.
 #[derive(Debug, Clone, PartialEq)]
@@ -186,7 +188,18 @@ pub async fn lookup_detailed(
     for (rank, p) in providers.into_iter().enumerate() {
         let q = q.clone();
         set.spawn(async move {
-            let r = match tokio::time::timeout(limit, p.fetch(&q)).await {
+            let attempt = async {
+                let first = p.fetch(&q).await;
+                // One quick retry for a transient network error (not rate limits, parse or config problems).
+                match first {
+                    Err(e) if e.kind == ErrorKind::Network => {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                        p.fetch(&q).await
+                    }
+                    other => other,
+                }
+            };
+            let r = match tokio::time::timeout(limit, attempt).await {
                 Ok(r) => r,
                 Err(_) => Err(AppError::new(ErrorKind::Network, format!("{} took too long to answer.", p.name()), "timeout")),
             };
@@ -220,6 +233,31 @@ pub async fn lookup_detailed(
     (LyricsResult::Unavailable, degraded)
 }
 
+/// One async mutex per cache key currently being looked up; entries nobody else holds are dropped on each call.
+fn flight_gate(key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    let mut m = GATES.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    m.retain(|_, g| Arc::strong_count(g) > 1);
+    m.entry(key.to_owned()).or_default().clone()
+}
+
+/// Warm the caches for a track in the background so the lyrics page opens instantly. Errors are ignored:
+/// the page asks again (and shows them) if the user really opens lyrics. Does nothing when lyrics are off.
+pub fn prefetch(q: Query) {
+    if q.video_id.is_empty() || q.title.is_empty() {
+        return;
+    }
+    crate::state::st().rt.spawn(async move {
+        let cfg = config::current();
+        if !cfg.lyrics.enabled {
+            return;
+        }
+        let dir = cache::default_dir();
+        let _ = resolve(crate::state::http(), &cfg.lyrics, cfg.security.allow_insecure_urls, &q, dir.as_deref()).await;
+    });
+}
+
 /// Everything the app does for one track: memory cache, disk cache, then the providers.
 pub async fn resolve(client: &reqwest::Client, cfg: &config::Lyrics, allow_insecure: bool, q: &Query, disk: Option<&Path>) -> LyricsResult {
     let providers = providers_from_config(client, cfg, allow_insecure);
@@ -230,6 +268,13 @@ pub async fn resolve(client: &reqwest::Client, cfg: &config::Lyrics, allow_insec
         return hit;
     }
     let disk = disk.filter(|_| cfg.cache_days > 0);
+    // Single flight: a prefetch and the lyrics page asking for the same track share one lookup. Whoever comes
+    // second waits here, then finds the answer in the cache below.
+    let gate = flight_gate(&key);
+    let _guard = gate.lock().await;
+    if let Some(hit) = cache::memory().get(&key) {
+        return hit;
+    }
     if let Some(dir) = disk {
         if let Some(hit) = cache::load(dir, &key, cfg.cache_days, now) {
             cache::memory().put(&key, hit.clone());

@@ -15,6 +15,10 @@ QQC2.ToolBar {
     visible: Player.hasTrack
     position: QQC2.ToolBar.Footer
 
+    // The position is extrapolated every frame, but over a whole track the slider moves a fraction of a pixel per
+    // second; follow it in quarter-second steps so the bar is not repainted 60 times a second for nothing.
+    readonly property real shownPosition: Math.round(applicationWindow().smoothPosition / 250) * 250
+
     function fmt(ms) {
         const s = Math.floor(ms / 1000)
         return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0")
@@ -25,12 +29,12 @@ QQC2.ToolBar {
 
         RowLayout {
             Layout.fillWidth: true
-            QQC2.Label { text: bar.fmt(applicationWindow().smoothPosition); font: Kirigami.Theme.smallFont }
+            QQC2.Label { text: bar.fmt(bar.shownPosition); font: Kirigami.Theme.smallFont }
             QQC2.Slider {
                 Layout.fillWidth: true
                 from: 0
                 to: Math.max(media.duration, 1)
-                value: applicationWindow().smoothPosition
+                value: bar.shownPosition
                 enabled: media.duration > 0
                 onMoved: applicationWindow().seek(value)
             }
@@ -93,12 +97,6 @@ QQC2.ToolBar {
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: liked ? qsTr("Remove from liked music") : qsTr("Like")
             }
             QQC2.ToolButton {
-                visible: Backend.loggedIn
-                icon.name: "list-add"
-                onClicked: applicationWindow().addToPlaylist({videoId: Player.videoId, title: Player.title})
-                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Add to playlist")
-            }
-            QQC2.ToolButton {
                 icon.name: "media-playlist-shuffle"
                 checkable: true
                 checked: Player.shuffle
@@ -113,14 +111,22 @@ QQC2.ToolBar {
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: Player.repeat === 0 ? qsTr("Repeat: off") : (Player.repeat === 1 ? qsTr("Repeat: all") : qsTr("Repeat: one"))
             }
             QQC2.ToolButton {
-                icon.name: "view-media-lyrics"
-                onClicked: applicationWindow().showLyrics()
-                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Lyrics")
-            }
-            QQC2.ToolButton {
-                icon.name: "view-media-playlist"
-                onClicked: applicationWindow().go("queue")
-                QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: qsTr("Queue")
+                icon.name: "overflow-menu"
+                display: QQC2.AbstractButton.IconOnly
+                text: qsTr("More")
+                checked: moreMenu.visible
+                onClicked: moreMenu.visible ? moreMenu.close() : moreMenu.popup(this, 0, -moreMenu.implicitHeight)
+                QQC2.ToolTip.visible: hovered && !moreMenu.visible; QQC2.ToolTip.text: text
+                QQC2.Menu {
+                    id: moreMenu
+                    QQC2.MenuItem { icon.name: "view-media-lyrics"; text: qsTr("Lyrics"); onTriggered: applicationWindow().showLyrics() }
+                    QQC2.MenuItem { icon.name: "view-media-playlist"; text: qsTr("Queue"); onTriggered: applicationWindow().go("queue") }
+                    QQC2.MenuItem {
+                        visible: Backend.loggedIn; height: visible ? implicitHeight : 0
+                        icon.name: "list-add"; text: qsTr("Add to playlist…")
+                        onTriggered: applicationWindow().addToPlaylist({videoId: Player.videoId, title: Player.title})
+                    }
+                }
             }
             RowLayout {
                 visible: applicationWindow().width > Kirigami.Units.gridUnit * 40
