@@ -28,9 +28,9 @@
     </p>
   </description>
   <launchable type="desktop-id">dev.bybrooklyn.yqt.desktop</launchable>
-  <url type="homepage">https://github.com/bybrooklyn/ytm-qt</url>
-  <url type="bugtracker">https://github.com/bybrooklyn/ytm-qt/issues</url>
-  <url type="vcs-browser">https://github.com/bybrooklyn/ytm-qt</url>
+  <url type="homepage">https://github.com/bybrooklyn/YQT</url>
+  <url type="bugtracker">https://github.com/bybrooklyn/YQT/issues</url>
+  <url type="vcs-browser">https://github.com/bybrooklyn/YQT</url>
   <categories>
     <category>AudioVideo</category>
     <category>Audio</category>
@@ -42,16 +42,23 @@
   <screenshots>
     <screenshot type="default">
       <caption>Home</caption>
-      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/home.png</image>
+      <image>https://raw.githubusercontent.com/bybrooklyn/YQT/main/docs/img/home.png</image>
     </screenshot>
     <screenshot>
       <caption>An album</caption>
-      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/album.png</image>
+      <image>https://raw.githubusercontent.com/bybrooklyn/YQT/main/docs/img/album.png</image>
     </screenshot>
     <screenshot>
       <caption>Synced lyrics</caption>
-      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/lyrics.png</image>
+      <image>https://raw.githubusercontent.com/bybrooklyn/YQT/main/docs/img/lyrics.png</image>
     </screenshot>
   </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-11-10">
+      <description>
+        <p>First public release.</p>
+      </description>
+    </release>
+  </releases>
   <content_rating type="oars-1.1" />
 </component>

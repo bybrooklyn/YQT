@@ -3,12 +3,14 @@
 # YQT
 
 A native YouTube Music client written in **Rust**, **Qt 6** ([cxx-qt](https://github.com/KDAB/cxx-qt)) and **Kirigami**.
-No browser engine, no Electron, no FFmpeg, no system OpenSSL: networking is rustls and the optional audio engine is pure Rust.
+No browser engine, no Electron, no system OpenSSL: networking is rustls and the optional audio engine is pure Rust.
 
 It looks and behaves like a normal KDE application: standard Kirigami and Breeze controls, nothing hand-drawn.
 
+YQT is an independent project. It is not affiliated with, endorsed by or supported by YouTube or Google, and it needs your own YouTube Music account for anything personal.
+
 <p align="center">
-  <img src="docs/img/home.png" alt="Home: shelves of cards" width="49%">
+  <img src="docs/img/home.png" alt="Home" width="49%">
   <img src="docs/img/artist.png" alt="An artist page with bio, Wikipedia link and top songs" width="49%">
 </p>
 <p align="center">
@@ -17,17 +19,18 @@ It looks and behaves like a normal KDE application: standard Kirigami and Breeze
 </p>
 <p align="center">
   <img src="docs/img/album.png" alt="An album page" width="49%">
-  <img src="docs/img/settings.png" alt="Settings: the equalizer and downloads" width="49%">
+  <img src="docs/img/settings.png" alt="Settings: sign-in and playback" width="49%">
 </p>
 
 ## Features
 
-- **Browse and play:** Home and Explore as shelves of cards; album, playlist and artist pages with a description or bio (YouTube's own text) and a Wikipedia link; Library, search, queue, shuffle, repeat, radio.
+- **Browse and play:** Home and Explore; album, playlist and artist pages with a description or bio (YouTube's own text) and a Wikipedia link; Library, search, queue, shuffle, repeat, radio.
 - **Lyrics:** [LRCLIB](https://lrclib.net), NetEase and YouTube's plain lyrics are asked in parallel and line-synced lyrics always win. Big type, the current line tinted with the cover's colour and filled as it is sung, the source as a quiet last line. Each provider can be switched off; they only ever receive title, artist and duration.
 - **Player:** transport on the left of the bar, smooth progress, press the bar to open or close the player; the queue reorders by dragging and has a ⋮ and right-click menu on every row.
 - **Downloads:** per song, album or playlist, plus opt-in smart downloads (liked songs, recently played, upcoming queue) within a storage limit (4 GB by default, configurable). Quality, your own folder, and automatic pause on a metered connection or low battery. Downloaded songs play from disk and work offline.
 - **Audio:** Qt Multimedia by default; switch to the built-in **pure-Rust engine** (symphonia, Opus via [opus-rs](https://crates.io/crates/opus-rs), AAC, resampling, limiter) for gapless playback, crossfade, loudness normalisation and a **10-band equalizer** with presets and preamp.
-- **Mini-player and system tray** (Linux: a StatusNotifierItem over D-Bus), close to the tray, MPRIS media keys, configurable keyboard shortcuts.
+- **Mini-player and system tray** (Linux: a StatusNotifierItem over D-Bus), close to the tray, MPRIS media keys, the mouse's back and forward buttons, configurable keyboard shortcuts.
+- **A good desktop citizen** (Linux): one instance (starting it again raises the window), a standard About page, AppStream metadata, and a desktop notification only when something went wrong while the window was not in view. Tracks changing are never announced.
 - **Sign-in:** Settings → *Import from <browser>* (Chrome, Chromium, Brave, Vivaldi, Edge, Opera, Firefox, Zen, LibreWolf, Waterfox) or paste cookies. Enables Library, Liked music, History, personalised Home, likes and add-to-playlist, and **reports plays back to YouTube** so your history and recommendations stay right (Settings → Privacy turns it off).
 - **Settings:** one scrolling page; every change is validated, saved to `config.toml` with your comments intact, and applies at once.
 
@@ -42,9 +45,11 @@ Install Qt 6, Kirigami and qqc2-desktop-style from your distro (on Debian/Ubuntu
 ```sh
 just run          # debug build and run
 just check        # fmt + clippy + tests
-just install      # ~/.local/bin + desktop entry
+just install      # ~/.local/bin + desktop entry, icon and AppStream metadata
 just              # list every recipe
 ```
+
+`just export-linux` builds `dist/yqt-linux-x86_64.zip`, a bundle with the Qt, Kirigami and Breeze files it needs.
 
 ### Windows (experimental)
 
@@ -68,12 +73,12 @@ Install Qt 6 and Kirigami through Craft, then `just package-macos` builds a `.ap
 
 ### Other recipes
 
-`just deny` (licences, advisories; OpenSSL is banned), `just live` (live checks against YouTube and LRCLIB, needs network), `just config` (where `config.toml` lives).
+`just deny` (licences, advisories; OpenSSL is banned), `just screenshots` (retakes the pictures above from the real app, signed out, hidden and silent), `just live` (live checks against YouTube and LRCLIB, needs network), `just config` (where `config.toml` lives).
 
 ## How it works
 
 - **Data:** [RustyPipe](https://github.com/TeamPiped/rustypipe) (InnerTube client) for search, browse, library and history.
-- **Streams:** InnerTube's visionOS client (`src/vision.rs`), served through a small token-protected localhost proxy (`src/proxy.rs`). Settings → *Check streams* tests the route.
+- **Streams:** InnerTube's visionOS client (`src/vision.rs`), served through a small token-protected localhost proxy (`src/proxy.rs`). Settings → *Check streams* tests the route. Songs YouTube only plays for a signed-in account go through the web player with your own session (`src/challenge.rs`), which runs YouTube's player script in an embedded QuickJS.
 - **Logic lives in Rust**: list models, page controllers, paging and caching, errors, downloads, lyrics ranking, settings. QML is the view.
 
 ## Configuration
@@ -89,7 +94,7 @@ See [SECURITY.md](SECURITY.md) for the threat model. In short: your cookies stay
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
-| Builds and runs | ✅ developed and tested | ⚠️ not built yet | ⚠️ not built yet |
+| Builds and runs | ✅ developed and tested | ⚠️ not built yet | ⚠️ cross-compiles from Linux and starts under Wine; the window needs Kirigami from KDE Craft, which has not been tried on real Windows |
 | Look | Kirigami + Breeze, follows Plasma | same (`org.kde.desktop`, Fusion only if missing) | same (`org.kde.desktop`, Fusion only if missing) |
 | Sign-in: paste cookies | ✅ | ✅ | ✅ |
 | Sign-in: Firefox-family import | ✅ | ✅ (logic tested) | ✅ (logic tested) |
@@ -107,6 +112,8 @@ The real Keychain and DPAPI calls and the Qt/Kirigami build on macOS and Windows
 - Not yet confirmed on a live Plasma session: the tray icon in a real panel (it is tested against a fake tray host: `just tray-test`), the mini-player's always-on-top flag on Wayland, and the bar's colour in a genuinely unfocused window (the colour pin is checked against a forced Inactive palette).
 - Queue drag-to-reorder is tested with synthesised mouse events (`just qml-test`), not with a physical mouse.
 - NetEase lyrics use an unofficial API and may stop working.
+- A sign-in imported from a browser goes stale when that browser renews its session (minutes to hours). The app notices and imports it again by itself; with pasted cookies you have to paste again.
+- YouTube changes its private interfaces without notice, so a page or playback can break until the app (or RustyPipe) catches up.
 
 ## License
 

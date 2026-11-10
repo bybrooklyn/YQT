@@ -37,8 +37,6 @@ mod page;
 mod mpris_stub_check;
 mod nav;
 mod notify;
-#[cfg(target_os = "linux")]
-mod single;
 mod pagedata;
 mod pages;
 mod platform;
@@ -49,6 +47,8 @@ mod reporting;
 mod security;
 mod session;
 mod settings;
+#[cfg(target_os = "linux")]
+mod single;
 mod state;
 mod tray;
 mod vision;
@@ -108,7 +108,7 @@ fn main() {
         app.as_mut().set_organization_domain(&QString::from("bybrooklyn.dev"));
         app.as_mut().set_application_name(&QString::from("yqt"));
         app.as_mut().set_application_version(&QString::from(env!("CARGO_PKG_VERSION"))); // the About page reads it
-        // Lets KDE/Wayland match the window to dev.bybrooklyn.yqt.desktop and so to its icon.
+                                                                                         // Lets KDE/Wayland match the window to dev.bybrooklyn.yqt.desktop and so to its icon.
         QGuiApplication::set_desktop_file_name(&QString::from("dev.bybrooklyn.yqt"));
     }
     let mut engine = QQmlApplicationEngine::new();
@@ -116,7 +116,9 @@ fn main() {
         #[cfg(feature = "harness")]
         let entry = {
             // canned pages and no stream lookups: nothing leaves the machine
-            if std::env::var_os("YTM_DEMO").is_some() || std::env::args().any(|a| a == "--qml") {
+            // (`YQT_HARNESS_LIVE`: a `--qml` driver over the real, signed-out YouTube Music, e.g. for the README screenshots)
+            let live = std::env::var_os("YQT_HARNESS_LIVE").is_some();
+            if std::env::var_os("YTM_DEMO").is_some() || (!live && std::env::args().any(|a| a == "--qml")) {
                 page::install_demo_source();
                 player::disable_streams();
             }

@@ -41,6 +41,22 @@ tray-test:
 qml-test:
     QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software QT_QUICK_CONTROLS_STYLE=org.kde.desktop /usr/lib/qt6/bin/qmltestrunner -input tests/qml
 
+# Retake the README screenshots (docs/img) from the real app: signed out, in a hidden session, without sound
+[linux]
+screenshots:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --features harness
+    profile=$(mktemp -d)
+    trap 'rm -rf "$profile"' EXIT
+    mkdir -p "$profile/config/yqt" docs/img
+    # the Rust engine is the one that can run without a sound device (YTM_AUDIO_NULL); Qt Multimedia would be heard
+    printf '[audio]\nengine = "rust"\n' > "$profile/config/yqt/config.toml"
+    XDG_DATA_HOME="$profile/data" XDG_CONFIG_HOME="$profile/config" XDG_CACHE_HOME="$profile/cache" \
+        YQT_MULTI_INSTANCE=1 YQT_HARNESS_LIVE=1 YTM_AUDIO_NULL=1 QT_ASSUME_STDERR_HAS_CONSOLE=1 \
+        timeout 180 gamescope --backend headless -W 1000 -H 720 -- \
+        ./target/debug/yqt --qml "$PWD/tests/screenshots.qml" "$PWD/docs/img" 2>&1 | grep 'qml:' || true
+
 # Live checks against YouTube / LRCLIB (needs network): stream route, search, pagination, lyrics
 live:
     cargo test -- --ignored --nocapture live_ vision_route

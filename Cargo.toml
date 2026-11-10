@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "A tiny native YouTube Music client (Rust, Qt 6, Kirigami)"
+repository = "https://github.com/bybrooklyn/YQT"
+homepage = "https://github.com/bybrooklyn/YQT"
+readme = "README.md"
+publish = false # an application, not a library: it is not meant for crates.io
 
 [dependencies]
 cxx = "1"
