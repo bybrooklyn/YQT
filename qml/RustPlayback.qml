@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 
 // The pure-Rust backend of the Playback seam (audio.engine = "rust"): symphonia + opus-rs + rubato + EQ + cpal, no
 // FFmpeg and no Qt Multimedia. The position comes from the engine's sample-accurate frame counter.
@@ -21,6 +21,9 @@ Item {
     readonly property int position: engine.position
     readonly property int duration: engine.duration
     readonly property bool playing: engine.playing
+    /// Asked to play but no audio is moving (a stream is opening, or the network fell behind): Playback.qml holds
+    /// the smooth clock still meanwhile.
+    readonly property bool stalled: engine.loading || engine.stalled
     readonly property bool hasSource: source.toString() !== ""
 
     // ---- events
@@ -43,8 +46,14 @@ Item {
     }
 
     // Player clears `source` between two tracks. Right after a track ended the engine may already be playing the next
-    // one (gapless), so an empty source is only acted on if no new source follows shortly.
-    Timer { id: clearTimer; interval: 400; onTriggered: engine.stop() }
+    // one (gapless), so an empty source is only acted on if no new source follows shortly. While Player is still
+    // resolving the track it switched to (that can take longer than this timer on a slow network) the source is on
+    // its way: stopping now would cut off, and then restart, the very track that is already playing.
+    Timer {
+        id: clearTimer
+        interval: 400
+        onTriggered: { if (Player.hasTrack && Player.loading) restart(); else engine.stop() }
+    }
 
     function _applySource() {
         const s = source.toString()

@@ -29,6 +29,8 @@ use std::time::Duration;
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 /// How long one provider may take before we go on without it.
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(12);
+/// How long the remaining providers still get once one of them has delivered believable synced lyrics.
+const SYNCED_GRACE: Duration = Duration::from_millis(1500);
 /// Pause before the single retry of a provider that hit a network error.
 const RETRY_DELAY: Duration = Duration::from_millis(400);
 
@@ -208,7 +210,18 @@ pub async fn lookup_detailed(
     }
     let mut cands: Vec<Candidate> = Vec::new();
     let mut failures: Vec<AppError> = Vec::new();
-    while let Some(joined) = set.join_next().await {
+    // Once believable synced lyrics are in hand the slower providers only get a short grace period: a blocked or
+    // slow service must not hold a good answer back for the whole provider timeout.
+    let mut deadline: Option<tokio::time::Instant> = None;
+    loop {
+        let joined = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, set.join_next()).await {
+                Ok(j) => j,
+                Err(_) => break, // dropping the set cancels the stragglers
+            },
+            None => set.join_next().await,
+        };
+        let Some(joined) = joined else { break };
         match joined {
             Ok((rank, name, Ok(found))) => {
                 tracing::debug!("lyrics: {name} offered {} record(s)", found.len());
@@ -219,6 +232,12 @@ pub async fn lookup_detailed(
                 failures.push(e);
             }
             Err(e) => failures.push(AppError::new(ErrorKind::Internal, "A lyrics service failed unexpectedly.", e.to_string())),
+        }
+        if deadline.is_none()
+            && prefer_synced
+            && matches!(rank::pick(cands.clone(), q, min_lines, prefer_synced), Some(Pick::Synced { .. }))
+        {
+            deadline = Some(tokio::time::Instant::now() + SYNCED_GRACE.min(limit));
         }
     }
     let degraded = !failures.is_empty();
@@ -262,7 +281,7 @@ pub fn prefetch(q: Query) {
 pub async fn resolve(client: &reqwest::Client, cfg: &config::Lyrics, allow_insecure: bool, q: &Query, disk: Option<&Path>) -> LyricsResult {
     let providers = providers_from_config(client, cfg, allow_insecure);
     let names: Vec<&str> = providers.iter().map(|p| p.name()).collect();
-    let key = cache::key(q, &names, cfg.min_lines);
+    let key = cache::key_with(q, &names, cfg.min_lines, &cache::settings_tag(cfg));
     let now = cache::unix_now();
     if let Some(hit) = cache::memory().get(&key) {
         return hit;
@@ -282,14 +301,27 @@ pub async fn resolve(client: &reqwest::Client, cfg: &config::Lyrics, allow_insec
         }
     }
     let (result, degraded) = lookup_detailed(providers, q, cfg.min_lines, cfg.prefer_synced, PROVIDER_TIMEOUT).await;
-    // Cache only a complete answer: while a provider was down, "unavailable" or a weaker copy could be wrong.
-    if !degraded {
+    let (memory, on_disk) = cacheable(&result, degraded);
+    if memory {
         cache::memory().put(&key, result.clone());
-        if let Some(dir) = disk {
-            cache::store(dir, &key, &result, now);
-        }
+    }
+    if let (true, Some(dir)) = (on_disk, disk) {
+        cache::store(dir, &key, &result, now);
     }
     result
+}
+
+/// Where an answer may be remembered: `(memory, disk)`. A complete answer goes to both. While a provider was down
+/// synced lyrics are still the best there is, so they are kept too; plain lyrics might be beaten by a synced copy
+/// once that provider is back, so they only stay in memory for a while; "unavailable" could simply be wrong.
+fn cacheable(result: &LyricsResult, degraded: bool) -> (bool, bool) {
+    match result {
+        LyricsResult::Failed(_) => (false, false),
+        _ if !degraded => (true, true),
+        LyricsResult::Synced { .. } => (true, true),
+        LyricsResult::Plain { .. } => (true, false),
+        LyricsResult::Unavailable => (false, false),
+    }
 }
 
 #[cfg(test)]
@@ -420,6 +452,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synced_lyrics_do_not_wait_for_a_stuck_provider() {
+        // the provider timeout is far away: only the grace period after the synced answer may pass
+        let ps = vec![Mock::provider("slow", Script::Hang), Mock::provider("ok", Script::Found(vec![synced_cand("ok", 6)]))];
+        let started = std::time::Instant::now();
+        let (r, degraded) = lookup_detailed(ps, &query(), 4, true, Duration::from_secs(60)).await;
+        assert!(matches!(r, LyricsResult::Synced { .. }));
+        assert!(!degraded, "a provider that was merely not waited for has not failed");
+        assert!(started.elapsed() < SYNCED_GRACE + Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn found_lyrics_are_cached_even_when_a_provider_was_down() {
+        let synced = LyricsResult::Synced { lines: vec![(0, "a".into())], source: "x".into() };
+        let plain = LyricsResult::Plain { text: "a".into(), source: "x".into() };
+        let failed = LyricsResult::Failed(net_err());
+        assert_eq!(cacheable(&synced, false), (true, true));
+        assert_eq!(cacheable(&plain, false), (true, true));
+        assert_eq!(cacheable(&LyricsResult::Unavailable, false), (true, true)); // (the disk store itself skips "unavailable")
+        assert_eq!(cacheable(&synced, true), (true, true));
+        assert_eq!(cacheable(&plain, true), (true, false), "a synced copy may exist at the provider that was down");
+        assert_eq!(cacheable(&LyricsResult::Unavailable, true), (false, false));
+        assert_eq!((cacheable(&failed, false), cacheable(&failed, true)), ((false, false), (false, false)));
+    }
+
+    #[tokio::test]
     async fn provider_order_breaks_ties() {
         let ps = vec![
             Mock::provider("second", Script::Found(vec![synced_cand("second", 8)])),
@@ -464,7 +521,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = config::Lyrics { providers: vec!["lrclib".into()], lrclib_url: "http://127.0.0.1:1".into(), ..Default::default() };
         let q = Query { video_id: "resolveCache".into(), ..query() };
-        let key = cache::key(&q, &["LRCLIB"], cfg.min_lines);
+        let key = cache::key_with(&q, &["LRCLIB"], cfg.min_lines, &cache::settings_tag(&cfg));
         let cached = LyricsResult::Plain { text: "a\nb\nc\nd".into(), source: "LRCLIB".into() };
         cache::store(&dir, &key, &cached, cache::unix_now());
         let c = reqwest::Client::new();

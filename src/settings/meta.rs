@@ -212,7 +212,8 @@ pub static META: &[Meta] = &[
     f("audio.eq_preamp_db", "eq", "Preamp", "Gain applied before the bands.").range(-24.0, 24.0).step(0.5).unit("dB").hidden(),
     Meta::new("audio.eq_bands_db", "eq", FloatList, "Equalizer bands", "Ten gains in dB: 31 Hz to 16 kHz.").range(-24.0, 24.0).hidden(),
     // ---- downloads ----
-    Meta::new("downloads.dir", "downloads", Dir, "Download folder", "Where downloaded songs are stored. Empty uses the app's data folder."),
+    Meta::new("downloads.dir", "downloads", Dir, "Download folder", "Where downloaded songs are stored. Empty uses the app's data folder.")
+        .restart(),
     Meta::new("downloads.quality", "downloads", Choice, "Download quality", "Higher quality uses more storage.").choices(&[
         ("best", "Best"),
         ("normal", "Normal"),
@@ -245,7 +246,7 @@ pub static META: &[Meta] = &[
     b("downloads.pause_on_metered", "smart", "Pause on metered connections", "Do not download over a connection your system marks as metered."),
     b("downloads.pause_on_low_battery", "smart", "Pause on low battery", "Do not download while the battery is low and unplugged."),
     n("downloads.low_battery_percent", "smart", "Low battery threshold", "Battery level below which downloads pause.").range(1.0, 90.0).unit("%").slider(),
-    n("downloads.max_parallel", "smart", "Parallel downloads", "How many songs are downloaded at the same time.").range(1.0, 16.0),
+    n("downloads.max_parallel", "smart", "Parallel downloads", "How many songs are downloaded at the same time.").range(1.0, 8.0),
     // ---- lyrics ----
     b(
         "lyrics.enabled",
@@ -297,6 +298,7 @@ pub static META: &[Meta] = &[
     b("window.mini_always_on_top", "window", "Mini-player on top", "Keep the mini-player above other windows."),
     b("window.remember_geometry", "window", "Remember window size and position", "Restore the window as you left it.").hidden(),
     b("integration.mpris", "window", "Desktop media controls", "Publish playback to the desktop (MPRIS on Linux) for media keys and widgets.").restart(),
+    b("integration.notifications", "window", "Error notifications", "Show errors as desktop notifications while the window is in the background. Nothing else is announced."),
     // ---- shortcuts ----
     k("keys.play_pause", "Play / pause"),
     k("keys.next", "Next song"),

@@ -78,8 +78,11 @@ pub fn similarity(a: &str, b: &str) -> u32 {
     if a == b {
         return 1000;
     }
-    let ta: Vec<&str> = a.split(' ').collect();
-    let tb: Vec<&str> = b.split(' ').collect();
+    // word *sets*: a repeated word ("la la la") must not count more than once, or the score passes 1000
+    fn words(s: &str) -> Vec<&str> {
+        s.split(' ').collect::<std::collections::BTreeSet<&str>>().into_iter().collect()
+    }
+    let (ta, tb) = (words(&a), words(&b));
     let common = ta.iter().filter(|w| tb.contains(w)).count();
     // Dice coefficient on word sets; a name contained in the other ("Song" in "Song Remastered") still scores well.
     let dice = 2000 * common / (ta.len() + tb.len());
@@ -182,6 +185,9 @@ mod tests {
         assert!(similarity("Totally Different", "Song Name") < MIN_SIMILARITY);
         assert!(similarity("Song Name Remastered", "Song Name") >= 800);
         assert_eq!(similarity("", "x"), 500);
+        // repeated words count once: never above an exact match
+        assert!(similarity("la la la", "la") <= 1000);
+        assert!(similarity("la la la", "la") >= 800);
     }
 
     #[test]

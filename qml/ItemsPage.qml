@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -52,20 +52,28 @@ Kirigami.ScrollablePage {
 
     // pagination
     property int pagerId: 0
-    // The Rust side keeps each list's pager (and every item fetched so far) until told to forget it.
+    // The Rust side keeps each list's pager (and every item fetched so far) for as long as a page holds it. (A feed
+    // that is still walking the list when this page lets go finishes first: see Backend.dropPager.)
     property int heldPager: 0
     onPagerIdChanged: {
         if (heldPager > 0 && heldPager !== pagerId) Backend.dropPager(heldPager)
         heldPager = pagerId
+        if (pagerId > 0) Backend.holdPager(pagerId)
     }
     Component.onDestruction: if (pagerId > 0) Backend.dropPager(pagerId)
     property bool hasMore: false
     property bool loadingMore: false
     property int moreId: -1
-    property bool feedQueue: false   // after "Play" on a long list: keep loading pages and append songs to the queue
+    // After "Play" (or "Download") on a long list the remaining pages are fetched by Rust (Backend.feedQueue /
+    // feedDownloads) and their songs appended to the queue (downloaded) there, so that goes on when this page closes
+    // and stops when the queue is replaced. While it runs this is true, and the pages also arrive here, under
+    // `moreId`, to be shown.
+    property bool feedQueue: false
 
     // progressive pages (Home): rows by slot, so they can arrive in any order
     property var slots: ({})
+    // the slots that arrived in the load that is running (a quiet refresh starts with the cached copy's)
+    property var seenSlots: ({})
     readonly property bool progressive: target === "home" && query.length === 0
 
 
@@ -106,6 +114,7 @@ Kirigami.ScrollablePage {
         heading = res.title || ""
         subheading = res.subtitle || ""
         headThumb = res.thumbnail || ""
+        if (collection && heading.length > 0) title = heading   // "Go to album" only knows the song's name when it opens the page
         hero = res.hero || null
         shelves = res.shelves || []
         radio = res.radio || null
@@ -116,12 +125,29 @@ Kirigami.ScrollablePage {
         items = res.items || []
     }
 
+    // What makes two rows the same row on screen.
+    function rowKey(i) { return [i.kind, i.videoId, i.browseId, i.title, i.subtitle, i.thumbnail, i.section, i.duration].join("\u0001") }
+    // Show `all` by changing only the stretch of the list that differs: the rows before and after it stay as they are
+    // (no flicker, the scroll position holds). Home's rows arrive one section at a time, so that is "append" or
+    // "insert one section"; a quiet refresh that brings the same rows changes nothing at all.
+    function patchRows(all) {
+        if (shelfMode) { model.clear(); items = all; return }
+        if (model.count !== items.length) { model.clear(); items = [] }   // (never expected: start over rather than guess)
+        const old = items
+        let head = 0
+        while (head < old.length && head < all.length && rowKey(old[head]) === rowKey(all[head])) ++head
+        let tail = 0
+        while (tail < old.length - head && tail < all.length - head
+               && rowKey(old[old.length - 1 - tail]) === rowKey(all[all.length - 1 - tail])) ++tail
+        const gone = old.length - head - tail
+        if (gone > 0) model.remove(head, gone)
+        for (let i = head; i < all.length - tail; ++i) model.insert(i, all[i])
+        items = all
+    }
     function rebuildFromSlots() {
         const all = []
         for (const k of Object.keys(slots).map(Number).sort((a, b) => a - b)) for (const i of slots[k]) all.push(i)
-        model.clear()
-        if (!shelfMode) for (const i of all) model.append(i)
-        items = all
+        patchRows(all)
     }
     // Opening a card in a shelf (the list rows use `activate(i)` by index instead).
     function activateItem(item) {
@@ -134,7 +160,10 @@ Kirigami.ScrollablePage {
     function load(force) {
         pinTop = true
         clearError()
+        // Answers still on their way belong to what was shown before: they must not land on (or be cached as) this load.
+        reqId = -1; moreId = -1
         pagerId = 0; hasMore = false; loadingMore = false; feedQueue = false
+        seenSlots = ({})
         if (needsLogin && !Backend.loggedIn) {
             setError(qsTr("Sign in from Settings to see your library"))
             model.clear(); items = []
@@ -156,23 +185,43 @@ Kirigami.ScrollablePage {
         else reqId = Backend.browse(filter && target === "library" ? target + ":" + filter : target)
     }
 
-    // Fetch the next page only when the list is close to its end (or we are feeding the queue).
+    // Fetch the next page only when the list is close to its end (a feed fetches the rest by itself).
     // "Close" is judged by which row sits at the bottom of the viewport, not by contentHeight: a ListView only
     // *estimates* its height until delegates exist, and that estimate is far too small right after a page arrives.
     function nearEnd() {
         if (view.count === 0 || view.height <= 0) return false
         const bottom = view.indexAt(view.width / 2, view.contentY + view.height - 1)
-        return bottom < 0 || bottom >= view.count - 10   // -1: past the last row (or on a section header)
+        if (bottom >= 0) return bottom >= view.count - 10
+        // -1: past the last row, but also on the page header or a section header. Only the first is the end of the
+        // list, and then the last row exists (a tall header at the top of a long list must not load page after page).
+        return view.itemAtIndex(view.count - 1) !== null
     }
     function maybeMore() {
-        if (hasMore && !loadingMore && !busy && pagerId > 0 && (feedQueue || nearEnd())) {
+        if (hasMore && !loadingMore && !busy && pagerId > 0 && nearEnd()) {
             loadingMore = true
             moreId = Backend.more(pagerId)
         }
     }
+    // Hand the rest of the list to the Rust feed. Call it right after the queue was built (or the downloads asked for)
+    // from the songs this page has, in the same handler: every page that reaches this page later, one that is on its
+    // way right now included, is then also appended (downloaded) by Rust, exactly once. Asking again while a feed
+    // runs joins it.
+    function startFeed(download) {
+        if (!hasMore || pagerId <= 0) return
+        feedQueue = true; loadingMore = true
+        moreId = download ? Backend.feedDownloads(pagerId) : Backend.feedQueue(pagerId, Player.queueEpoch())
+    }
+    function downloadAll() {
+        Downloads.downloadAll(JSON.stringify(songs()))
+        startFeed(true)
+    }
     function startPlaying(list, start) {
         Player.playList(JSON.stringify(list), start)
-        if (hasMore) { feedQueue = true; maybeMore() }
+        startFeed(false)
+    }
+    function enqueueAll() {
+        for (const s of songs()) Player.enqueue(JSON.stringify(s))
+        startFeed(false)
     }
 
     Connections {
@@ -185,6 +234,7 @@ Kirigami.ScrollablePage {
             const next = Object.assign({}, page.slots)
             next[slot] = res.items
             page.slots = next
+            page.seenSlots[slot] = true
             page.rebuildFromSlots()
         }
         function onDone(id, err, json) {
@@ -198,6 +248,10 @@ Kirigami.ScrollablePage {
                 const res = page.parse(json)
                 if (!res) { if (page.items.length === 0) page.setError(qsTr("Got an unreadable answer from the app.")); return }
                 if (page.progressive) {
+                    // Rows of the copy shown before this refresh that did not come again (the feed got shorter) go.
+                    const kept = {}
+                    for (const k in page.slots) if (page.seenSlots[k]) kept[k] = page.slots[k]
+                    if (Object.keys(kept).length !== Object.keys(page.slots).length) { page.slots = kept; page.rebuildFromSlots() }
                     page.cachePut({slots: Object.assign({}, page.slots)})
                     return
                 }
@@ -206,20 +260,27 @@ Kirigami.ScrollablePage {
                 // (no eager "fetch more" here: the list calls maybeMore itself once it has laid the rows out)
             } else if (id === page.moreId) {
                 page.loadingMore = false
+                page.feedQueue = false
                 if (err) { page.hasMore = false; return }   // keep what we have
                 const res = page.parse(json)
                 if (!res) { page.hasMore = false; return }
                 page.hasMore = !!res.more
-                for (const i of res.items) model.append(i)
-                page.items = page.items.concat(res.items)
-                if (page.feedQueue) {
-                    for (const s of res.items) if (s.kind === "song") Player.enqueue(JSON.stringify(s))
-                    Qt.callLater(page.maybeMore)   // feeding the queue ignores scroll position: keep going
+                if (res.items.length > 0) {
+                    for (const i of res.items) model.append(i)
+                    page.items = page.items.concat(res.items)
                 }
+                // A page from a feed says whether the next one follows by itself (Rust has dealt with its songs); the
+                // feed keeps the list busy for as long as it runs.
+                page.feedQueue = page.loadingMore = !!res.feeding
             }
         }
+        // (a page showing an error may be waiting for exactly this: its request was refused for want of a session)
         function onLoggedInChanged() {
-            if (page.needsLogin || page.reloadOnLogin) page.load(true)
+            if (page.needsLogin || page.reloadOnLogin || page.errorText.length > 0) page.load(true)
+        }
+        // Same account, fresh cookies: what was fetched (or refused) with the stale ones is loaded again.
+        function onSessionRenewed() {
+            if (page.needsLogin || page.reloadOnLogin || page.errorText.length > 0) page.load(true)
         }
     }
 
@@ -228,8 +289,9 @@ Kirigami.ScrollablePage {
         if (!item) return
         if (item.kind === "song") {
             if (collection) {
-                const s = songs()
-                Player.playList(JSON.stringify(s), Math.max(0, s.findIndex(x => x.videoId === item.videoId)))
+                // the whole list from the clicked row (counted by position: a song can be in a list twice), and the
+                // pages not loaded yet follow into the queue
+                startPlaying(songs(), items.slice(0, i).filter(x => x.kind === "song").length)
             } else {
                 Player.playSong(JSON.stringify(item))
             }
@@ -244,12 +306,14 @@ Kirigami.ScrollablePage {
     ListModel { id: model }
 
     // One context menu for the whole list, pointed at a row when it opens (a menu per row made long lists slow to build).
-    function openMenu(i) { rowMenu.at = i; rowMenu.popup() }
+    function openMenu(i) { rowMenu.at = i; rowMenu.item = itemAt(i); rowMenu.popup() }
     QQC2.Menu {
         id: rowMenu
         property int at: -1
         property string dl: "none"          // this song's download state, read each time the menu opens
-        readonly property var item: page.itemAt(at)
+        // The song itself, taken when the menu opens: rows can shift under an open menu (Home fills in row by row).
+        property var item: null
+        function field(key) { return item && item[key] ? item[key] : "" }
         readonly property string videoId: item ? item.videoId : ""
         property bool liked: false
         onAboutToShow: { dl = Downloads.state(videoId); liked = Backend.isLiked(videoId) }
@@ -266,18 +330,26 @@ Kirigami.ScrollablePage {
         }
         QQC2.MenuSeparator { visible: Backend.loggedIn }
         QQC2.MenuItem {
-            visible: page.field(rowMenu.at, "artistId") !== ""
+            visible: rowMenu.field("artistId") !== ""
             height: visible ? implicitHeight : 0
             text: qsTr("Go to artist")
             icon.name: "view-media-artist"
-            onTriggered: applicationWindow().open({kind: "artist", browseId: page.field(rowMenu.at, "artistId"), title: page.field(rowMenu.at, "artist")})
+            onTriggered: applicationWindow().open({kind: "artist", browseId: rowMenu.field("artistId"), title: rowMenu.field("artist")})
         }
         QQC2.MenuItem {
-            visible: page.field(rowMenu.at, "albumId") !== ""
+            visible: rowMenu.field("albumId") !== ""
             height: visible ? implicitHeight : 0
             text: qsTr("Go to album")
             icon.name: "media-optical-audio"
-            onTriggered: applicationWindow().open({kind: "album", browseId: page.field(rowMenu.at, "albumId"), title: page.field(rowMenu.at, "title")})
+            onTriggered: applicationWindow().open({kind: "album", browseId: rowMenu.field("albumId"), title: rowMenu.field("title")})
+        }
+        // Plays this song with the rest of its album around it in the queue (a plain click is followed by a radio).
+        QQC2.MenuItem {
+            visible: rowMenu.field("albumId") !== "" && rowMenu.field("kind") === "song"
+            height: visible ? implicitHeight : 0
+            text: qsTr("Play album")
+            icon.name: "media-playback-start"
+            onTriggered: Player.playAlbum(JSON.stringify(rowMenu.item))
         }
         QQC2.MenuItem {
             visible: Backend.loggedIn
@@ -405,6 +477,8 @@ Kirigami.ScrollablePage {
         model: model
         clip: true
         reuseItems: true
+        // No row is "current" until the keyboard picks one: otherwise the first row of every page is drawn selected.
+        currentIndex: -1
         // Lazy paging: look again whenever the scroll position or content size changes.
         onContentYChanged: page.maybeMore()
         onContentHeightChanged: page.maybeMore()
@@ -463,13 +537,13 @@ Kirigami.ScrollablePage {
                         text: qsTr("Add to queue")
                         icon.name: "media-playlist-append"
                         enabled: page.songs().length > 0
-                        onClicked: { for (const s of page.songs()) Player.enqueue(JSON.stringify(s)) }
+                        onClicked: page.enqueueAll()
                     }
                     QQC2.Button {
                         text: qsTr("Download")
                         icon.name: "download"
                         enabled: page.songs().length > 0
-                        onClicked: Downloads.downloadAll(JSON.stringify(page.songs()))
+                        onClicked: page.downloadAll()
                     }
                     QQC2.Button {
                         visible: page.radio !== null

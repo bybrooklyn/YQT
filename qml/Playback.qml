@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 
 // The single seam between the UI and whatever plays the audio.
 //
@@ -57,8 +57,13 @@ Item {
 
     PlaybackClock { id: clock }
 
+    // A backend may say that it is waiting for audio (`stalled`: opening a stream, buffering). The clock is then held
+    // like a paused one instead of running ahead of the sound. A backend without the property never stalls it.
+    readonly property bool _stalled: !!_b && _b.stalled === true
+    on_StalledChanged: _resync()
+
     function _resync() {
-        clock.report(pb.position, Date.now(), pb.playing)
+        clock.report(pb.position, Date.now(), pb.playing && !pb._stalled)
         _smooth = clock.positionAt(Date.now())
     }
 

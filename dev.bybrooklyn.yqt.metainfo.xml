@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="desktop-application">
+  <id>dev.bybrooklyn.yqt</id>
+  <name>YQT</name>
+  <summary>Tiny native YouTube Music client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="dev.bybrooklyn">
+    <name>bybrooklyn</name>
+  </developer>
+  <description>
+    <p>
+      YQT plays YouTube Music in a small native window built with Qt and Kirigami, so it looks and behaves like the
+      rest of a Plasma desktop: your colour scheme, your window decorations, media keys, a tray icon.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Home, Explore, search, and your library, liked songs and history when signed in</li>
+      <li>A queue with drag-to-reorder, radio after a single song, gapless playback and crossfade</li>
+      <li>Synced lyrics from LRCLIB, NetEase and YouTube Music</li>
+      <li>Downloads for offline listening, with rules for what to keep</li>
+      <li>An equaliser, a mini-player, and configurable keyboard shortcuts</li>
+    </ul>
+    <p>
+      Signing in imports your YouTube session from a browser on this computer; it is only ever sent to YouTube.
+      YQT is not affiliated with YouTube or Google.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.bybrooklyn.yqt.desktop</launchable>
+  <url type="homepage">https://github.com/bybrooklyn/ytm-qt</url>
+  <url type="bugtracker">https://github.com/bybrooklyn/ytm-qt/issues</url>
+  <url type="vcs-browser">https://github.com/bybrooklyn/ytm-qt</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+  <provides>
+    <binary>yqt</binary>
+  </provides>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Home</caption>
+      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/home.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An album</caption>
+      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/album.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Synced lyrics</caption>
+      <image>https://raw.githubusercontent.com/bybrooklyn/ytm-qt/main/docs/img/lyrics.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1" />
+</component>

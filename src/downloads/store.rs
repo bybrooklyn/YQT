@@ -76,6 +76,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS pins (
                 collection TEXT NOT NULL, video_id TEXT NOT NULL, item TEXT NOT NULL,
                 PRIMARY KEY (collection, video_id)
+             );
+             -- (added later; IF NOT EXISTS is the whole migration: an older database simply gains the empty table)
+             CREATE TABLE IF NOT EXISTS queue (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, video_id TEXT NOT NULL UNIQUE, item TEXT NOT NULL
              );",
         )?;
         Ok(Store { db })
@@ -122,6 +126,7 @@ impl Store {
         Ok(self.db.execute("DELETE FROM songs WHERE video_id = ?1", [id])? > 0)
     }
 
+    #[allow(dead_code)] // used by the tests; the manager counts only the files that are in the folder (`manager::present`)
     pub fn total_bytes(&self) -> rusqlite::Result<i64> {
         self.db.query_row("SELECT COALESCE(SUM(size), 0) FROM songs", [], |r| r.get(0))
     }
@@ -138,16 +143,41 @@ impl Store {
 
     /// "Keep offline": remember the members of a collection (`items` = (video id, item JSON)); `on = false` forgets it.
     pub fn set_collection(&self, collection: &str, items: &[(String, String)], on: bool) -> rusqlite::Result<()> {
-        self.db.execute("DELETE FROM pins WHERE collection = ?1", [collection])?;
+        // one transaction: all of the collection or none of it (and one commit instead of one per song)
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute("DELETE FROM pins WHERE collection = ?1", [collection])?;
         if on {
+            let mut insert = tx.prepare("INSERT OR REPLACE INTO pins (collection, video_id, item) VALUES (?1, ?2, ?3)")?;
             for (id, item) in items {
-                self.db.execute(
-                    "INSERT OR REPLACE INTO pins (collection, video_id, item) VALUES (?1, ?2, ?3)",
-                    params![collection, id, item],
-                )?;
+                insert.execute(params![collection, id, item])?;
             }
         }
-        Ok(())
+        tx.commit()
+    }
+
+    /// Remember downloads the user asked for (`items` = (video id, item JSON)), so they survive a restart. All in one
+    /// transaction; a song that is already recorded keeps its place in the order.
+    pub fn queue_add(&self, items: &[(String, String)]) -> rusqlite::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO queue (video_id, item) VALUES (?1, ?2)")?;
+            for (id, item) in items {
+                insert.execute(params![id, item])?;
+            }
+        }
+        tx.commit()
+    }
+
+    /// Forget a recorded download (it finished, was cancelled or removed, or failed for good).
+    pub fn queue_remove(&self, id: &str) -> rusqlite::Result<bool> {
+        Ok(self.db.execute("DELETE FROM queue WHERE video_id = ?1", [id])? > 0)
+    }
+
+    /// The recorded downloads in the order they were asked for: (video id, item JSON).
+    pub fn queued(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut st = self.db.prepare("SELECT video_id, item FROM queue ORDER BY seq")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
     }
 
     pub fn is_collection_kept(&self, collection: &str) -> rusqlite::Result<bool> {
@@ -242,6 +272,62 @@ mod tests {
         s.set_collection("B", &[], false).unwrap();
         assert!(!s.get("aaaaaaaaaaa").unwrap().unwrap().pinned);
         assert_eq!(s.pinned_members().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn the_queue_keeps_its_order_and_ignores_duplicates() {
+        let s = Store::open_memory().unwrap();
+        let rec = |id: &str| (id.to_owned(), format!("{{\"videoId\":\"{id}\"}}"));
+        s.queue_add(&[rec("ccccccccccc"), rec("aaaaaaaaaaa")]).unwrap();
+        s.queue_add(&[rec("bbbbbbbbbbb"), rec("ccccccccccc")]).unwrap();
+        let ids = |s: &Store| s.queued().unwrap().into_iter().map(|x| x.0).collect::<Vec<_>>();
+        assert_eq!(ids(&s), ["ccccccccccc", "aaaaaaaaaaa", "bbbbbbbbbbb"], "asked-for order; a repeat keeps its place");
+        assert!(s.queue_remove("aaaaaaaaaaa").unwrap());
+        assert!(!s.queue_remove("aaaaaaaaaaa").unwrap());
+        // asked for again later = at the back
+        s.queue_add(&[rec("aaaaaaaaaaa")]).unwrap();
+        assert_eq!(ids(&s), ["ccccccccccc", "bbbbbbbbbbb", "aaaaaaaaaaa"]);
+        s.queue_add(&[]).unwrap();
+        assert_eq!(s.queued().unwrap()[0].1, "{\"videoId\":\"ccccccccccc\"}");
+    }
+
+    #[test]
+    fn an_older_database_without_the_queue_table_is_upgraded() {
+        let dir = std::env::temp_dir().join(format!("ytm-dl-store-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("downloads.sqlite");
+        {
+            // the schema as it was before the queue existed, with data in it
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE songs (
+                    video_id TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT NOT NULL, album TEXT NOT NULL,
+                    cover TEXT NOT NULL, duration_ms INTEGER NOT NULL, size INTEGER NOT NULL, format TEXT NOT NULL,
+                    mime TEXT NOT NULL, added INTEGER NOT NULL, last_played INTEGER, pinned INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE pins (
+                    collection TEXT NOT NULL, video_id TEXT NOT NULL, item TEXT NOT NULL,
+                    PRIMARY KEY (collection, video_id)
+                 );
+                 INSERT INTO songs VALUES ('aaaaaaaaaaa','T','A','Al','c',1,5,'m4a','audio/mp4',1,NULL,1);
+                 INSERT INTO pins VALUES ('PL1','bbbbbbbbbbb','{}');",
+            )
+            .unwrap();
+            assert!(db.prepare("SELECT 1 FROM queue").is_err(), "the old database has no queue table");
+        }
+        let s = Store::open(&path).unwrap();
+        assert!(s.queued().unwrap().is_empty());
+        s.queue_add(&[("ccccccccccc".to_owned(), "{}".to_owned())]).unwrap();
+        assert_eq!(s.queued().unwrap().len(), 1);
+        // and nothing that was there is touched
+        let old = s.get("aaaaaaaaaaa").unwrap().unwrap();
+        assert_eq!((old.size, old.pinned), (5, true));
+        assert!(s.is_collection_kept("PL1").unwrap());
+        drop(s);
+        assert_eq!(Store::open(&path).unwrap().queued().unwrap().len(), 1, "opening again is harmless");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

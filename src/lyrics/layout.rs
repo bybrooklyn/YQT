@@ -71,6 +71,16 @@ pub fn to_json(items: &[Item]) -> String {
     serde_json::Value::Array(v).to_string()
 }
 
+/// The same rows as [`to_json`], as values, for `Backend.lyrics`: `[ms, text, end, gap, fillMs]`. With `gaps` off
+/// (`lyrics.gap_dots`) the pause entries are left out and only the sung lines remain.
+pub fn values(lines: &[Line], track_ms: i64, gaps: bool) -> Vec<serde_json::Value> {
+    items(lines, track_ms)
+        .into_iter()
+        .filter(|i| gaps || !i.gap)
+        .map(|i| serde_json::json!([i.start, i.text, i.end, i.gap, i.fill_ms]))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +141,21 @@ mod tests {
         assert_eq!(j[1][1], "a");
         assert_eq!(j[0][3], true);
         assert!(items(&[], 0).is_empty());
+    }
+
+    #[test]
+    fn the_rows_the_lyrics_panel_gets_carry_the_fill_time_and_optional_gaps() {
+        let l = parse_lrc("[00:10.00]one\n[00:12.00]two\n[00:14.00]\n[00:30.00]three");
+        let with = values(&l, 40_000, true);
+        // every row has all five fields the karaoke fill reads: start, text, end, gap, fillMs
+        assert!(with.iter().all(|r| r.as_array().is_some_and(|a| a.len() == 5)));
+        assert_eq!(with[1][0], 10_000);
+        assert_eq!(with[1][1], "one");
+        assert!(with[1][4].as_i64().unwrap() >= 1 && with[1][4].as_i64().unwrap() <= 2000);
+        assert_eq!(with.iter().filter(|r| r[3] == true).count(), 2, "intro and the long pause");
+        let without = values(&l, 40_000, false);
+        assert_eq!(without.iter().map(|r| r[1].as_str().unwrap()).collect::<Vec<_>>(), ["one", "two", "three"]);
+        assert_eq!(without.last().unwrap()[2], 40_000, "the track length bounds the last line");
     }
 
     #[test]

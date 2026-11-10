@@ -39,12 +39,13 @@ pub struct Item {
 pub fn parse_duration_ms(s: &str) -> i64 {
     let mut total: i64 = 0;
     for part in s.trim().split(':') {
-        match part.parse::<i64>() {
-            Ok(n) if (0..100_000).contains(&n) => total = total * 60 + n,
-            _ => return 0,
+        // checked: a hostile "99999:99999:99999:…" must not overflow
+        match part.parse::<i64>().ok().filter(|n| (0..100_000).contains(n)).and_then(|n| total.checked_mul(60)?.checked_add(n)) {
+            Some(t) => total = t,
+            None => return 0,
         }
     }
-    total * 1000
+    total.checked_mul(1000).unwrap_or(0)
 }
 
 impl Item {
@@ -138,6 +139,15 @@ impl DlError {
             DlError::Cancelled => "cancelled".into(),
             DlError::Unavailable(e) => e.clone(),
         }
+    }
+}
+
+/// A failed stream lookup as a download error: a request that did not get through is worth retrying, YouTube's own
+/// "no" is not.
+fn formats_error(e: crate::vision::FormatsError) -> DlError {
+    match e {
+        crate::vision::FormatsError::Transient(m) => DlError::Net(m),
+        crate::vision::FormatsError::Unavailable(m) => DlError::Unavailable(m),
     }
 }
 
@@ -276,9 +286,18 @@ pub fn finish(store: &Store, dir: &Path, item: &Item, ext: &str, mime: &str, par
 }
 
 /// Drop index rows whose file is gone; delete `.part` leftovers older than a week. Returns the removed ids.
+///
+/// An empty (missing, just created) folder while the index knows songs is not taken as "everything was deleted": far
+/// more likely the folder is on a drive that is not mounted, or the setting was pointed somewhere new. The rows are
+/// kept then (with their pins and play history), and [`present`] decides what counts as downloaded right now.
 pub fn reconcile(store: &Store, dir: &Path) -> Vec<String> {
     let mut gone = Vec::new();
-    for s in store.list().unwrap_or_default() {
+    let rows = store.list().unwrap_or_default();
+    let folder_empty = std::fs::read_dir(dir).map_or(true, |mut rd| rd.next().is_none());
+    if folder_empty && !rows.is_empty() {
+        return gone;
+    }
+    for s in rows {
         let exists = quality::file_name(&s.video_id, &s.format).is_some_and(|n| dir.join(n).is_file());
         if !exists {
             let _ = store.remove(&s.video_id);
@@ -304,6 +323,30 @@ pub fn reconcile(store: &Store, dir: &Path) -> Vec<String> {
     gone
 }
 
+/// The index rows whose file is in `dir` right now: (ids, total bytes). Only these count as downloaded.
+pub fn present(store: &Store, dir: &Path) -> (HashSet<String>, i64) {
+    let mut ids = HashSet::new();
+    let mut bytes = 0i64;
+    for s in store.list().unwrap_or_default() {
+        if quality::file_name(&s.video_id, &s.format).is_some_and(|n| dir.join(n).is_file()) {
+            bytes = bytes.saturating_add(s.size.max(0));
+            ids.insert(s.video_id);
+        }
+    }
+    (ids, bytes)
+}
+
+/// Delete the partial files of `id` (every stream's), except the one named `keep`.
+pub fn remove_parts(dir: &Path, id: &str, keep: Option<&str>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        if name.to_str().is_some_and(|n| quality::is_part_of(n, id) && keep != Some(n)) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Delete every file a song can have on disk (final + partial). Only validated ids ever reach the file system.
 pub fn delete_files(dir: &Path, id: &str) {
     if !valid_id(id) {
@@ -312,9 +355,9 @@ pub fn delete_files(dir: &Path, id: &str) {
     for ext in quality::EXTS {
         if let Some(n) = quality::file_name(id, ext) {
             let _ = std::fs::remove_file(dir.join(&n));
-            let _ = std::fs::remove_file(dir.join(format!("{n}.part")));
         }
     }
+    remove_parts(dir, id, None);
 }
 
 // ---- global manager ----------------------------------------------------------------------------
@@ -386,11 +429,20 @@ pub fn dir_for(cfg_dir: &str, data_dir: &Path) -> PathBuf {
     }
 }
 
+/// The downloads folder of this run, latched at first use. A change of `downloads.dir` applies from the next start:
+/// switching folders under a running index would show songs as downloaded that are not in the new folder and leave
+/// removals pointing at the wrong place. At that start the index rows are kept (see [`reconcile`]), so files the
+/// user moved into the new folder are simply picked up again.
+fn session_dir() -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| dir_for(&crate::config::current().downloads.dir, &crate::state::data_dir())).clone()
+}
+
 impl Settings {
     pub fn load() -> Settings {
         let d = &crate::config::current().downloads;
         Settings {
-            dir: dir_for(&d.dir, &crate::state::data_dir()),
+            dir: session_dir(),
             quality: d.quality.clone(),
             rules: Rules::from_config(d),
             max_parallel: d.max_parallel.clamp(1, 8) as usize,
@@ -461,12 +513,19 @@ pub fn init() {
     ONCE.get_or_init(|| {
         let cfg = Settings::load();
         let _ = crate::state::ensure_private_dir(&cfg.dir);
-        with_store(|s| {
+        if let Some((have, used, again)) = with_store(|s| {
             reconcile(s, &cfg.dir);
+            let (have, used) = present(s, &cfg.dir);
+            // what the user had asked for when the app was last closed, in the same order
+            let again = restorable(s, &have);
+            (have, used, again)
+        }) {
             let mut inner = mgr().inner.lock().unwrap();
-            inner.have = s.list().unwrap_or_default().into_iter().map(|x| x.video_id).collect();
-            inner.used = s.total_bytes().unwrap_or(0);
-        });
+            (inner.have, inner.used) = (have, used);
+            for item in again {
+                add_job(&mut inner, item); // (started by the watcher below, once it knows whether downloads are paused)
+            }
+        }
         let metered: Arc<dyn Metered> = Arc::from(metered::system_metered());
         *mgr().metered_note.lock().unwrap() = metered.note();
         crate::connectivity::subscribe(|_| {
@@ -476,11 +535,15 @@ pub fn init() {
         let rt = crate::state::st().rt.handle().clone();
         rt.spawn(async move {
             let battery: Arc<dyn BatteryProbe> = Arc::new(metered::SystemBattery);
-            let mut last_smart = Instant::now() - SMART_INTERVAL;
+            // (not `Instant::now() - SMART_INTERVAL`: that panics on systems whose clock starts at boot, soon after boot)
+            let mut last_smart: Option<Instant> = None;
             loop {
                 refresh_pause(metered.clone(), battery.clone()).await;
-                if last_smart.elapsed() >= SMART_INTERVAL {
-                    last_smart = Instant::now();
+                if last_smart.is_none() {
+                    kick(); // first round: the downloads restored from the last run start now (unless paused)
+                }
+                if smart_due(last_smart) {
+                    last_smart = Some(Instant::now());
                     evaluate();
                 }
                 tokio::select! {
@@ -490,6 +553,11 @@ pub fn init() {
             }
         });
     });
+}
+
+/// Is the periodic smart-download pass due? `None` = it has not run yet in this session.
+fn smart_due(last: Option<Instant>) -> bool {
+    last.is_none_or(|t| t.elapsed() >= SMART_INTERVAL)
 }
 
 async fn refresh_pause(metered: Arc<dyn Metered>, battery: Arc<dyn BatteryProbe>) {
@@ -542,22 +610,18 @@ pub fn active_count() -> i32 {
 }
 
 pub fn set_paused(on: bool) {
+    init(); // the watcher must be there: resuming is its decision
     mgr().inner.lock().unwrap().user_paused = on;
-    {
-        // apply immediately; the watcher re-evaluates the full rule set right after
-        let mut p = mgr().pause.lock().unwrap();
-        if on {
-            *p = Some(PauseReason::User);
-        } else if *p == Some(PauseReason::User) {
-            *p = None;
-        }
-        mgr().paused_flag.store(p.is_some(), Ordering::Relaxed);
+    if on {
+        // pausing applies immediately
+        *mgr().pause.lock().unwrap() = Some(PauseReason::User);
+        mgr().paused_flag.store(true, Ordering::Relaxed);
     }
+    // Resuming does not clear the pause here: being offline, on a metered connection or low on battery may still hold
+    // the downloads back, and starting them for a moment would only make them fail. The watcher is woken instead; it
+    // works out the real reason and starts the queue itself when there is none.
     emit(Event::Stats);
     mgr().wake.notify_one();
-    if !on {
-        kick();
-    }
 }
 
 pub fn is_downloaded(id: &str) -> bool {
@@ -576,33 +640,107 @@ pub fn state_of(id: &str) -> (&'static str, i32) {
     }
 }
 
+/// Put a song in the queue unless it is downloaded or already queued / downloading. `true` = a job was added.
+fn add_job(i: &mut Inner, item: Item) -> bool {
+    if !valid_id(&item.id)
+        || i.have.contains(&item.id)
+        || matches!(i.jobs.get(&item.id).map(|j| &j.state), Some(JobState::Queued | JobState::Downloading { .. }))
+    {
+        return false;
+    }
+    let id = item.id.clone();
+    i.jobs.insert(id.clone(), Job { item, state: JobState::Queued, cancel: Arc::new(AtomicBool::new(false)) });
+    i.waiting.push_back(id);
+    true
+}
+
+/// What the index remembers of a download the user asked for: (video id, item JSON).
+fn record_of(item: &Item) -> (String, String) {
+    (item.id.clone(), item.to_json().to_string())
+}
+
+/// Queue downloads the user asked for. Returns (was a job added, the records to remember so they survive a restart):
+/// every song that is not downloaded yet is remembered, also one the smart rules had queued already (the user now
+/// wants it regardless of them). Smart downloads never come through here: the planner works them out again.
+fn queue_manual(i: &mut Inner, items: Vec<Item>) -> (bool, Vec<(String, String)>) {
+    let (mut added, mut records) = (false, Vec::new());
+    for item in items {
+        if !valid_id(&item.id) || i.have.contains(&item.id) {
+            continue;
+        }
+        records.push(record_of(&item));
+        added |= add_job(i, item);
+    }
+    (added, records)
+}
+
+/// The recorded downloads to queue again at start-up, in the order they were asked for. Records of songs that are
+/// downloaded by now (or that cannot be read) are dropped.
+pub fn restorable(store: &Store, have: &HashSet<String>) -> Vec<Item> {
+    let mut out = Vec::new();
+    for (id, json) in store.queued().unwrap_or_default() {
+        let item = serde_json::from_str::<Value>(&json).ok().and_then(|v| Item::from_json(&v)).filter(|it| it.id == id);
+        match item {
+            Some(it) if !have.contains(&id) => out.push(it),
+            _ => {
+                let _ = store.queue_remove(&id);
+            }
+        }
+    }
+    out
+}
+
+/// Is a finished job done for good (so its record goes)? A failure that could still work on another try keeps the
+/// record: the song is queued again at the next start.
+fn done_for_good(result: &Result<Song, DlError>) -> bool {
+    result.as_ref().map_or_else(|e| !e.retryable(), |_| true)
+}
+
+/// Drop the record of a download (it finished, was cancelled or removed, or failed for good).
+fn forget_queued(id: &str) {
+    with_store(|s| s.queue_remove(id).map_err(|e| tracing::warn!("downloads queue: {e}")));
+}
+
+/// Download a song because the user asked for it (remembered across restarts until it is done).
 pub fn enqueue(item: Item) {
-    if !valid_id(&item.id) {
+    enqueue_all(vec![item]);
+}
+
+/// [`enqueue`] for many songs at once (an album, a playlist page): one write to the index for all of them.
+pub fn enqueue_all(items: Vec<Item>) {
+    if !items.iter().any(|it| valid_id(&it.id)) {
         return;
     }
     init();
-    {
-        let mut i = mgr().inner.lock().unwrap();
-        if i.have.contains(&item.id)
-            || matches!(i.jobs.get(&item.id).map(|j| &j.state), Some(JobState::Queued | JobState::Downloading { .. }))
-        {
-            return;
-        }
-        let id = item.id.clone();
-        i.jobs.insert(id.clone(), Job { item, state: JobState::Queued, cancel: Arc::new(AtomicBool::new(false)) });
-        i.waiting.push_back(id);
+    let (added, records) = queue_manual(&mut mgr().inner.lock().unwrap(), items);
+    if !records.is_empty() {
+        // a failed write only costs the "survives a restart" part: the download itself goes ahead
+        with_store(|s| s.queue_add(&records).map_err(|e| tracing::warn!("downloads queue: {e}")));
     }
-    emit(Event::Stats);
-    kick();
+    if added {
+        emit(Event::Stats);
+        kick();
+    }
+}
+
+/// Queue a song the smart rules want. Not remembered: the planner derives it again after a restart.
+fn enqueue_smart(item: Item) {
+    if add_job(&mut mgr().inner.lock().unwrap(), item) {
+        emit(Event::Stats);
+        kick();
+    }
 }
 
 /// Cancel a running/queued job and forget a failed one.
 pub fn cancel(id: &str) {
-    let mut i = mgr().inner.lock().unwrap();
-    if let Some(j) = i.jobs.remove(id) {
-        j.cancel.store(true, Ordering::Relaxed);
+    {
+        let mut i = mgr().inner.lock().unwrap();
+        if let Some(j) = i.jobs.remove(id) {
+            j.cancel.store(true, Ordering::Relaxed);
+        }
+        i.waiting.retain(|x| x != id);
     }
-    i.waiting.retain(|x| x != id);
+    forget_queued(id);
 }
 
 /// Remove a song: stop its job, delete its files and its index row.
@@ -613,11 +751,19 @@ pub fn remove(id: &str) {
     cancel(id);
     let dir = Settings::load().dir;
     delete_files(&dir, id);
-    with_store(|s| s.remove(id));
+    // (the index is used before the state lock is taken, never while holding it)
+    let size = with_store(|s| {
+        let size = s.get(id).ok().flatten().map_or(0, |x| x.size.max(0));
+        let _ = s.remove(id);
+        size
+    })
+    .unwrap_or(0);
     {
         let mut i = mgr().inner.lock().unwrap();
-        i.have.remove(id);
-        i.used = with_store(|s| s.total_bytes().unwrap_or(0)).unwrap_or(0);
+        // only a song that counted as downloaded (its file was in the folder) was part of the total
+        if i.have.remove(id) {
+            i.used = i.used.saturating_sub(size).max(0);
+        }
     }
     emit(Event::Changed(id.to_owned()));
     emit(Event::Stats);
@@ -763,24 +909,47 @@ fn kick() {
     }
 }
 
-async fn run_job(item: Item, cancel: Arc<AtomicBool>) {
-    let result = run_attempts(&item, &cancel).await;
-    {
-        let mut i = mgr().inner.lock().unwrap();
-        i.active = i.active.saturating_sub(1);
-        match &result {
-            Ok(song) => {
-                i.jobs.remove(&item.id);
-                i.have.insert(item.id.clone());
+/// Apply a finished job to the shared state. A job only speaks for its song while it is still *the* job of that id
+/// (`cancel` is its identity): one that was removed, or replaced by a newer download of the same song, changes
+/// nothing. Returns `true` when it left a finished file behind that nobody wants (it completed while being removed).
+fn settle(i: &mut Inner, id: &str, cancel: &Arc<AtomicBool>, result: &Result<Song, DlError>) -> bool {
+    i.active = i.active.saturating_sub(1);
+    let mine = i.jobs.get(id).is_some_and(|j| Arc::ptr_eq(&j.cancel, cancel));
+    match result {
+        Ok(song) if mine => {
+            i.jobs.remove(id);
+            if i.have.insert(id.to_owned()) {
                 i.used += song.size;
             }
-            Err(DlError::Cancelled) => {}
-            Err(e) => {
-                if let Some(j) = i.jobs.get_mut(&item.id) {
-                    j.state = JobState::Failed(e.message());
-                }
-            }
+            false
         }
+        // (a newer job of the same song will replace the file itself; a song that is downloaded again keeps it)
+        Ok(_) => !i.jobs.contains_key(id) && !i.have.contains(id),
+        Err(DlError::Cancelled) => false,
+        Err(e) => {
+            if let Some(j) = i.jobs.get_mut(id).filter(|_| mine) {
+                j.state = JobState::Failed(e.message());
+            }
+            false
+        }
+    }
+}
+
+async fn run_job(item: Item, cancel: Arc<AtomicBool>) {
+    let mut result = run_attempts(&item, &cancel).await;
+    let (mine, orphaned) = {
+        let mut i = mgr().inner.lock().unwrap();
+        let mine = i.jobs.get(&item.id).is_some_and(|j| Arc::ptr_eq(&j.cancel, &cancel));
+        (mine, settle(&mut i, &item.id, &cancel, &result))
+    };
+    if mine && done_for_good(&result) {
+        forget_queued(&item.id); // (a job that was cancelled or replaced leaves the record to whoever owns it now)
+    }
+    if orphaned {
+        // removed while its last bytes were being written: take the file and the row away again
+        delete_files(&Settings::load().dir, &item.id);
+        with_store(|s| s.remove(&item.id));
+        result = Err(DlError::Cancelled);
     }
     if let Ok(song) = &result {
         crate::covercache::prefetch(&song.cover); // so the Downloads page has its art offline
@@ -806,7 +975,14 @@ async fn run_attempts(item: &Item, cancel: &Arc<AtomicBool>) -> Result<Song, DlE
         }
         match attempt_once(item, &cfg, cancel).await {
             Ok(song) => return Ok(song),
-            Err(e) if e.retryable() => last = e,
+            Err(e) if e.retryable() => {
+                if matches!(e, DlError::Net(_)) {
+                    // maybe the connection is gone: have it checked now, so the next attempt waits (paused as
+                    // "offline") instead of burning the remaining attempts within seconds
+                    crate::connectivity::check_now();
+                }
+                last = e;
+            }
             Err(e) => return Err(e),
         }
     }
@@ -817,17 +993,17 @@ async fn attempt_once(item: &Item, cfg: &Settings, cancel: &Arc<AtomicBool>) -> 
     while is_paused() && !cancel.load(Ordering::Relaxed) {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
-    let formats = crate::vision::audio_formats(&item.id).await.map_err(DlError::Unavailable)?;
+    let formats = crate::vision::audio_formats_typed(&item.id).await.map_err(formats_error)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DlError::Cancelled);
+    }
     let f = quality::pick(&formats, &cfg.quality).ok_or_else(|| DlError::Unavailable("no downloadable audio stream".into()))?;
     let ext = quality::ext_for_mime(&f.mime);
-    let name = quality::file_name(&item.id, ext).ok_or_else(|| DlError::Unavailable("invalid video id".into()))?;
-    let part = cfg.dir.join(format!("{name}.part"));
-    // a partial from another container can't be resumed
-    for other in quality::EXTS.iter().filter(|e| **e != ext) {
-        if let Some(n) = quality::file_name(&item.id, other) {
-            let _ = std::fs::remove_file(cfg.dir.join(format!("{n}.part")));
-        }
-    }
+    let name =
+        quality::part_name(&item.id, ext, f.itag, f.content_length).ok_or_else(|| DlError::Unavailable("invalid video id".into()))?;
+    let part = cfg.dir.join(&name);
+    // only a partial of this very stream can be resumed: one of another container or another quality goes
+    remove_parts(&cfg.dir, &item.id, Some(&name));
     // free-space check before writing a lot
     let need = f.content_length.unwrap_or(rules::DEFAULT_SONG_BYTES);
     let free = free_space(&cfg.dir);
@@ -836,14 +1012,14 @@ async fn attempt_once(item: &Item, cfg: &Settings, cancel: &Arc<AtomicBool>) -> 
     }
     let started = Instant::now();
     let mut meter = SpeedMeter::default();
-    let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut last_emit: Option<Instant> = None;
     let id = item.id.clone();
     let mut progress = move |done: u64, total: u64| {
         let bps = meter.update(started.elapsed().as_millis() as u64, done);
-        if last_emit.elapsed() < Duration::from_millis(250) {
+        if last_emit.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
             return;
         }
-        last_emit = Instant::now();
+        last_emit = Some(Instant::now());
         let percent = done.saturating_mul(100).checked_div(total).map_or(0, |p| p.min(100) as i32);
         if let Some(j) = mgr().inner.lock().unwrap().jobs.get_mut(&id) {
             j.state = JobState::Downloading { percent, bps: bps as i64 };
@@ -862,6 +1038,9 @@ async fn attempt_once(item: &Item, cfg: &Settings, cancel: &Arc<AtomicBool>) -> 
         &mut progress,
     )
     .await?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(DlError::Cancelled); // removed during the last chunk: do not put the file in place
+    }
     let (mime, dir, item2) = (f.mime.clone(), cfg.dir.clone(), item.clone());
     let ext = ext.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -902,6 +1081,8 @@ pub fn evaluate() {
         let st = PlanState {
             stored: songs
                 .iter()
+                // only what is in the folder now (rows of an absent folder are kept, but they are not "stored")
+                .filter(|s| i.have.contains(&s.video_id))
                 .map(|s| Stored {
                     id: s.video_id.clone(),
                     size: s.size.max(0) as u64,
@@ -925,7 +1106,7 @@ pub fn evaluate() {
             Action::Evict { id, .. } => remove(&id),
             Action::Download { id, .. } => {
                 if let Some(item) = lookup.get(&id) {
-                    enqueue(item.clone());
+                    enqueue_smart(item.clone());
                 }
             }
         }
@@ -1190,6 +1371,9 @@ mod tests {
         for bad in ["", "abc", "1:xx", "-1:00", ":"] {
             assert_eq!(parse_duration_ms(bad), 0, "{bad}");
         }
+        // absurdly long input must not overflow (it used to panic in debug builds and wrap in release ones)
+        assert_eq!(parse_duration_ms(&["99999"; 14].join(":")), 0);
+        assert_eq!(parse_duration_ms(&["99999"; 40].join(":")), 0);
     }
 
     #[test]
@@ -1291,6 +1475,224 @@ mod tests {
         let src = super::super::local_source_in(&dir, id).expect("local source");
         assert_eq!(src.len, size);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_empty_or_missing_folder_does_not_wipe_the_index() {
+        let dir = tmpdir("recon-absent");
+        let store = Store::open_memory().unwrap();
+        for id in ["aaaaaaaaaaa", "bbbbbbbbbbb"] {
+            let part = dir.join("p.part");
+            std::fs::write(&part, b"xyz").unwrap();
+            finish(&store, &dir, &Item { id: id.into(), ..Default::default() }, "webm", "audio/webm", &part, 1).unwrap();
+        }
+        store.set_pinned("aaaaaaaaaaa", true).unwrap();
+        // the drive is not mounted / the setting points at a new place: an empty folder, or none at all
+        let empty = tmpdir("recon-empty");
+        let missing = dir.join("not-there");
+        for absent in [&empty, &missing] {
+            assert!(reconcile(&store, absent).is_empty());
+            assert_eq!(store.list().unwrap().len(), 2, "rows (and their pins) survive");
+            assert_eq!(present(&store, absent), (HashSet::new(), 0), "but nothing counts as downloaded there");
+        }
+        assert!(store.get("aaaaaaaaaaa").unwrap().unwrap().pinned);
+        // back in the real folder everything is there again
+        assert!(reconcile(&store, &dir).is_empty());
+        let (ids, bytes) = present(&store, &dir);
+        assert_eq!((ids.len(), bytes), (2, 6));
+        // a folder that has files but lacks one song still loses just that row
+        std::fs::remove_file(dir.join("bbbbbbbbbbb.webm")).unwrap();
+        assert_eq!(reconcile(&store, &dir), ["bbbbbbbbbbb"]);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(empty);
+    }
+
+    #[test]
+    fn partials_of_other_streams_are_removed_and_never_resumed() {
+        let dir = tmpdir("parts");
+        let id = "dQw4w9WgXcQ";
+        let normal = quality::part_name(id, "m4a", 140, Some(3_400_000)).unwrap();
+        let saver = quality::part_name(id, "m4a", 139, Some(1_300_000)).unwrap();
+        let names = [normal.as_str(), saver.as_str(), "dQw4w9WgXcQ.m4a.part", "dQw4w9WgXcQ.251-9.webm.part"];
+        for n in names.iter().chain(&["aaaaaaaaaaa.140-1.m4a.part", "movie.mkv.part", "dQw4w9WgXcQ.m4a"]) {
+            std::fs::write(dir.join(n), b"partial").unwrap();
+        }
+        // the quality changed to data saver: its own partial stays, every other partial of the song goes
+        remove_parts(&dir, id, Some(&saver));
+        assert!(dir.join(&saver).exists());
+        for gone in [normal.as_str(), "dQw4w9WgXcQ.m4a.part", "dQw4w9WgXcQ.251-9.webm.part"] {
+            assert!(!dir.join(gone).exists(), "{gone}");
+        }
+        for kept in ["aaaaaaaaaaa.140-1.m4a.part", "movie.mkv.part", "dQw4w9WgXcQ.m4a"] {
+            assert!(dir.join(kept).exists(), "{kept}: not a partial of this song");
+        }
+        delete_files(&dir, id);
+        assert!(!dir.join(&saver).exists() && !dir.join("dQw4w9WgXcQ.m4a").exists());
+        assert!(dir.join("aaaaaaaaaaa.140-1.m4a.part").exists() && dir.join("movie.mkv.part").exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn song(id: &str, size: i64) -> Song {
+        Song {
+            video_id: id.into(),
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            cover: String::new(),
+            duration_ms: 0,
+            size,
+            format: "m4a".into(),
+            mime: "audio/mp4".into(),
+            added: 1,
+            last_played: None,
+            pinned: false,
+        }
+    }
+
+    fn inner_with_job(id: &str) -> (Inner, Arc<AtomicBool>) {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut i = Inner { active: 1, ..Default::default() };
+        let item = Item { id: id.into(), ..Default::default() };
+        i.jobs.insert(id.into(), Job { item, state: JobState::Downloading { percent: 0, bps: 0 }, cancel: cancel.clone() });
+        (i, cancel)
+    }
+
+    #[test]
+    fn a_finished_job_only_counts_while_it_is_still_the_songs_job() {
+        let id = "dQw4w9WgXcQ";
+        // the normal case
+        let (mut i, cancel) = inner_with_job(id);
+        assert!(!settle(&mut i, id, &cancel, &Ok(song(id, 10))));
+        assert!(i.have.contains(id) && i.jobs.is_empty() && i.used == 10 && i.active == 0);
+
+        // removed while finishing: not downloaded, and the leftover file is reported
+        let (mut i, cancel) = inner_with_job(id);
+        i.jobs.remove(id);
+        assert!(settle(&mut i, id, &cancel, &Ok(song(id, 10))), "the file must be cleaned up");
+        assert!(!i.have.contains(id) && i.used == 0);
+
+        // removed and queued again: the old job must not finish or fail the new one
+        let (mut i, old) = inner_with_job(id);
+        let (newer, _) = inner_with_job(id);
+        i.jobs = newer.jobs;
+        assert!(!settle(&mut i, id, &old, &Ok(song(id, 10))), "the newer job will replace the file");
+        assert!(!i.have.contains(id) && i.jobs.contains_key(id));
+        i.active = 1;
+        assert!(!settle(&mut i, id, &old, &Err(DlError::Http(404))));
+        assert!(matches!(i.jobs[id].state, JobState::Downloading { .. }), "a stale failure does not mark the new job failed");
+
+        // its own failure does
+        let (mut i, cancel) = inner_with_job(id);
+        assert!(!settle(&mut i, id, &cancel, &Err(DlError::Http(404))));
+        assert!(matches!(i.jobs[id].state, JobState::Failed(_)));
+        let (mut i, cancel) = inner_with_job(id);
+        assert!(!settle(&mut i, id, &cancel, &Err(DlError::Cancelled)));
+        assert!(matches!(i.jobs[id].state, JobState::Downloading { .. }));
+    }
+
+    fn item(id: &str, title: &str) -> Item {
+        Item {
+            id: id.into(),
+            title: title.into(),
+            artist: "A".into(),
+            album: "Al".into(),
+            cover: "https://x.com/c.jpg".into(),
+            duration_ms: 61_000,
+        }
+    }
+
+    #[test]
+    fn queued_downloads_survive_a_restart_in_order() {
+        let dir = tmpdir("queue-restart");
+        let path = dir.join("downloads.sqlite");
+        let asked = vec![item("ccccccccccc", "Third letter first"), item("aaaaaaaaaaa", "A"), item("bbbbbbbbbbb", "B")];
+        {
+            // first run: the user queues three songs, then quits before any of them is done
+            let store = Store::open(&path).unwrap();
+            let mut i = Inner::default();
+            let (added, records) = queue_manual(&mut i, asked.clone());
+            assert!(added && i.waiting == ["ccccccccccc", "aaaaaaaaaaa", "bbbbbbbbbbb"]);
+            store.queue_add(&records).unwrap();
+        }
+        // next run: a fresh state, the same index file
+        let store = Store::open(&path).unwrap();
+        let again = restorable(&store, &HashSet::new());
+        assert_eq!(again, asked, "same songs, same order, with their titles and covers");
+        let mut i = Inner::default();
+        for it in again {
+            assert!(add_job(&mut i, it));
+        }
+        assert_eq!(i.waiting, ["ccccccccccc", "aaaaaaaaaaa", "bbbbbbbbbbb"]);
+        assert!(i.jobs.values().all(|j| j.state == JobState::Queued));
+        assert_eq!(store.queued().unwrap().len(), 3, "still remembered until they are done");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn finished_cancelled_and_removed_downloads_do_not_come_back() {
+        let store = Store::open_memory().unwrap();
+        let mut i = Inner::default();
+        let ids = ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd", "eeeeeeeeeee"];
+        let (_, records) = queue_manual(&mut i, ids.iter().map(|id| item(id, "T")).collect());
+        store.queue_add(&records).unwrap();
+        // a: finished (what `run_job` does for its own finished job); b: cancelled / removed (what `cancel` does)
+        assert!(done_for_good(&Ok(song("aaaaaaaaaaa", 1))));
+        store.queue_remove("aaaaaaaaaaa").unwrap();
+        store.queue_remove("bbbbbbbbbbb").unwrap();
+        // c: failed for good goes, d: failed but worth another try stays
+        assert!(done_for_good(&Err(DlError::Unavailable("private".into()))) && done_for_good(&Err(DlError::Http(404))));
+        store.queue_remove("ccccccccccc").unwrap();
+        assert!(!done_for_good(&Err(DlError::Net("offline".into()))) && !done_for_good(&Err(DlError::Incomplete)));
+        // e: its record is still there, but the file arrived some other way (it is downloaded)
+        let have: HashSet<String> = ["eeeeeeeeeee".to_owned()].into();
+        let again: Vec<String> = restorable(&store, &have).into_iter().map(|x| x.id).collect();
+        assert_eq!(again, ["ddddddddddd"]);
+        assert_eq!(store.queued().unwrap().len(), 1, "the record of the downloaded song was dropped too");
+        // an unreadable record is dropped instead of blocking the others
+        store
+            .queue_add(&[
+                ("fffffffffff".to_owned(), "not json".to_owned()),
+                ("ggggggggggg".to_owned(), "{\"videoId\":\"other\"}".to_owned()),
+            ])
+            .unwrap();
+        assert_eq!(restorable(&store, &HashSet::new()).len(), 1);
+        assert_eq!(store.queued().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn only_downloads_the_user_asked_for_are_remembered() {
+        let store = Store::open_memory().unwrap();
+        let mut i = Inner::default();
+        i.have.insert("hhhhhhhhhhh".into());
+        // the smart rules queue songs through `add_job` alone: a job, but nothing to remember
+        assert!(add_job(&mut i, item("sssssssssss", "smart")) && add_job(&mut i, item("ttttttttttt", "smart too")));
+        assert!(store.queued().unwrap().is_empty());
+        assert!(restorable(&store, &i.have).is_empty(), "after a restart the planner decides about them again");
+        // the user asks for: a new song, one the smart rules had queued, a downloaded one and nonsense
+        let (added, records) = queue_manual(
+            &mut i,
+            vec![item("mmmmmmmmmmm", "manual"), item("sssssssssss", "smart"), item("hhhhhhhhhhh", "have"), item("../x", "bad")],
+        );
+        assert!(added);
+        store.queue_add(&records).unwrap();
+        let remembered: Vec<String> = store.queued().unwrap().into_iter().map(|x| x.0).collect();
+        assert_eq!(remembered, ["mmmmmmmmmmm", "sssssssssss"], "not the other smart one, not the downloaded one");
+        assert_eq!(i.waiting, ["sssssssssss", "ttttttttttt", "mmmmmmmmmmm"], "no duplicate job for the one already queued");
+        // asking again for something queued adds no job
+        assert!(!queue_manual(&mut i, vec![item("mmmmmmmmmmm", "manual")]).0);
+    }
+
+    #[test]
+    fn a_failed_lookup_is_retried_only_when_the_network_was_the_problem() {
+        use crate::vision::FormatsError;
+        assert!(formats_error(FormatsError::Transient("dns".into())).retryable(), "a blip must not fail the song for good");
+        assert!(!formats_error(FormatsError::Unavailable("private".into())).retryable());
+    }
+
+    #[test]
+    fn the_first_smart_pass_is_due_without_clock_arithmetic() {
+        assert!(smart_due(None));
+        assert!(!smart_due(Some(Instant::now())));
     }
 
     #[test]

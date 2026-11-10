@@ -2,8 +2,9 @@
 //! User configuration: `<config dir>/yqt/config.toml`.
 //!
 //! Every tunable that used to be a literal lives here. The file is written with the defaults on
-//! first run; it is parsed leniently, so a missing key, a wrongly-typed value or even a syntax
-//! error never stops the app – the affected value (or file) just falls back to its default.
+//! first run; it is parsed leniently, so a missing key, a wrongly-typed or out-of-range value or
+//! even a syntax error never stops the app – the affected value (or, for a syntax error, the file)
+//! just falls back to its default. An existing file is never overwritten because it could not be read.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
@@ -133,6 +134,8 @@ pub struct Ui {
 pub struct Integration {
     /// Publish playback to the desktop (MPRIS on Linux).
     pub mpris: bool,
+    /// Show errors as desktop notifications while the window is not focused (nothing else is ever announced).
+    pub notifications: bool,
 }
 
 /// Audio engine and equalizer.
@@ -419,7 +422,7 @@ impl Default for Ui {
 
 impl Default for Integration {
     fn default() -> Self {
-        Self { mpris: true }
+        Self { mpris: true, notifications: true }
     }
 }
 
@@ -436,33 +439,75 @@ fn kind(v: &toml::Value) -> &'static str {
     }
 }
 
-/// Overlay `user` onto `base`, keeping the default wherever the user's value has the wrong type.
-fn merge(base: &mut toml::Table, user: toml::Table, path: &str, warnings: &mut Vec<String>) {
+/// Overlay `user` onto `base`, keeping the default wherever the user's value has the wrong type or is refused by
+/// `check` (which returns why a value of the right kind is still unusable: negative, fractional, a list of the
+/// wrong things…).
+fn merge(
+    base: &mut toml::Table,
+    user: toml::Table,
+    path: &str,
+    warnings: &mut Vec<String>,
+    check: &dyn Fn(&str, &toml::Value) -> Option<String>,
+) {
     for (key, value) in user {
         let here = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
         match base.get_mut(&key) {
             None => warnings.push(format!("unknown setting `{here}` ignored")),
             Some(toml::Value::Table(bt)) => match value {
-                toml::Value::Table(ut) => merge(bt, ut, &here, warnings),
+                toml::Value::Table(ut) => merge(bt, ut, &here, warnings, check),
                 _ => warnings.push(format!("`{here}` must be a table; using defaults")),
             },
-            Some(slot) if kind(slot) == kind(&value) => *slot = value,
+            Some(slot) if kind(slot) == kind(&value) => match check(&here, &value) {
+                None => *slot = value,
+                Some(why) => warnings.push(format!("`{here}` is not usable ({why}); using the default")),
+            },
             Some(slot) => warnings.push(format!("`{here}` must be a {}; using the default", kind(slot))),
         }
     }
 }
 
+/// Why `value` cannot be the setting at the dotted `path` (tested alone, on top of the defaults), or `None` if it can.
+fn leaf_problem(path: &str, value: &toml::Value) -> Option<String> {
+    let mut root = toml::Table::try_from(Config::default()).ok()?;
+    let mut keys: Vec<&str> = path.split('.').collect();
+    let last = keys.pop()?;
+    let mut table = &mut root;
+    for k in keys {
+        table = table.get_mut(k)?.as_table_mut()?;
+    }
+    table.insert(last.to_owned(), value.clone());
+    match root.try_into::<Config>() {
+        Ok(_) => None,
+        Err(e) => Some(e.message().to_owned()),
+    }
+}
+
 impl Config {
     /// Parse a config file's text. Never fails: returns the effective config plus human-readable warnings.
+    /// A value that cannot be used (wrong type, negative, fractional where a whole number is needed, …) costs only
+    /// that one setting its value; only a syntax error falls back to all defaults.
     pub fn parse(text: &str) -> (Config, Vec<String>) {
         let mut warnings = Vec::new();
-        let mut base = toml::Table::try_from(Config::default()).expect("defaults serialize");
-        match text.parse::<toml::Table>() {
-            Ok(user) => merge(&mut base, user, "", &mut warnings),
-            Err(e) => warnings.push(format!("syntax error, using all defaults: {}", e.message())),
+        let defaults = || toml::Table::try_from(Config::default()).expect("defaults serialize");
+        let user = match text.parse::<toml::Table>() {
+            Ok(user) => user,
+            Err(e) => {
+                warnings.push(format!("syntax error, using all defaults: {}", e.message()));
+                return (Config::default(), warnings);
+            }
+        };
+        // Fast path: everything of the right kind is taken as it is, which is right for almost every file.
+        let (mut base, mut fast) = (defaults(), Vec::new());
+        merge(&mut base, user.clone(), "", &mut fast, &|_, _| None);
+        if let Ok(cfg) = base.try_into::<Config>() {
+            warnings.extend(fast);
+            return (cfg, warnings);
         }
+        // Something has the right kind but the wrong value: test each setting on its own and drop only the bad ones.
+        let mut base = defaults();
+        merge(&mut base, user, "", &mut warnings, &leaf_problem);
         let cfg = base.try_into().unwrap_or_else(|e: toml::de::Error| {
-            warnings.push(format!("invalid configuration, using all defaults: {e}"));
+            warnings.push(format!("invalid configuration, using all defaults: {}", e.message()));
             Config::default()
         });
         (cfg, warnings)
@@ -494,15 +539,26 @@ pub fn get() -> &'static Config {
                 }
                 cfg
             }
-            Err(_) => {
-                if let Some(dir) = path.parent() {
-                    let _ = crate::state::ensure_private_dir(dir);
+            Err(e) => {
+                if first_run(&e) {
+                    if let Some(dir) = path.parent() {
+                        let _ = crate::state::ensure_private_dir(dir);
+                    }
+                    let _ = crate::state::write_private(&path, Config::template().as_bytes());
+                } else {
+                    // Unreadable (not UTF-8, permissions, a disk error): the file is the user's and stays as it is.
+                    eprintln!("yqt: {}: cannot be read ({e}); using the defaults and leaving the file alone", path.display());
                 }
-                let _ = crate::state::write_private(&path, Config::template().as_bytes());
                 Config::default()
             }
         }
     })
+}
+
+/// Only a file that does not exist yet is a first run that gets the template written; any other read error must
+/// never replace what the user has.
+fn first_run(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
 }
 
 /// A configuration that can be replaced while the app runs (the Settings screen does this on every change).
@@ -615,6 +671,40 @@ mod tests {
         assert_eq!(c.network.connect_timeout_secs, 10);
         assert_eq!(w.len(), 1);
         assert!(w[0].contains("syntax error"));
+    }
+
+    #[test]
+    fn a_bad_value_of_the_right_kind_costs_only_itself() {
+        // each of these used to throw the whole file away, switching the opt-outs below back on
+        for bad in [
+            "[network]\nconnect_timeout_secs = 1.5\n",
+            "[network]\nretries = -1\n",
+            "[lyrics]\nproviders = [1]\n",
+            "[audio]\neq_bands_db = [\"x\"]\n",
+        ] {
+            let text = format!("{bad}\n[reporting]\nenabled = false\nmin_play_secs = 45\n[downloads]\nquality = \"best\"\n");
+            let (c, w) = Config::parse(&text);
+            assert!(!c.reporting.enabled, "{bad}: the opt-out was lost");
+            assert_eq!(c.reporting.min_play_secs, 45, "{bad}");
+            assert_eq!(c.downloads.quality, "best", "{bad}");
+            assert_eq!(w.len(), 1, "{w:?}");
+            assert!(w[0].contains("using the default") && !w[0].contains("all defaults"), "{w:?}");
+        }
+        let (c, w) = Config::parse("[network]\nconnect_timeout_secs = 1.5\nretries = 4\n");
+        assert_eq!((c.network.connect_timeout_secs, c.network.retries), (10, 4));
+        assert!(w[0].contains("network.connect_timeout_secs"), "{w:?}");
+        // two bad values: both fall back, the rest stays
+        let (c, w) = Config::parse("[network]\nretries = -1\n[lyrics]\nenabled = false\ncache_days = 2.5\n");
+        assert_eq!((c.network.retries, c.lyrics.cache_days, c.lyrics.enabled), (1, 30, false));
+        assert_eq!(w.len(), 2, "{w:?}");
+    }
+
+    #[test]
+    fn only_a_missing_file_is_a_first_run() {
+        assert!(first_run(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        for kind in [std::io::ErrorKind::InvalidData, std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other] {
+            assert!(!first_run(&std::io::Error::from(kind)), "{kind:?} must not write the template over the file");
+        }
     }
 
     #[test]

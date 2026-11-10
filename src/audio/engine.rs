@@ -3,6 +3,7 @@
 //! that drives it from commands (never the Qt thread), and an offline renderer used by the tests.
 use super::eq::{EqParams, EqShared};
 use super::output::{self, Backend, Controls, Event, OutputDsp, Ring, SinkHandle, TrackMeta};
+use super::source::{self, Interrupt};
 use super::track::TrackStream;
 use std::f64::consts::FRAC_PI_2;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -101,11 +102,25 @@ pub struct Core {
     loudness: fn(&str) -> Option<f64>,
     /// The last track that was current, kept after it ended so a `seek` can restart it (repeat-one).
     last_url: Option<String>,
+    /// A "next" track that arrived while a crossfade was running: it follows the incoming track, so it is
+    /// installed the moment the fade is over.
+    after_fade: Option<(TrackStream, String)>,
 }
 
 impl Core {
     pub fn new(ring: Arc<Ring>, settings: Arc<Settings>, events: Sender<Event>) -> Self {
-        Self { ring, settings, events, cur: None, next: None, fade: None, serial: 0, loudness: crate::vision::loudness, last_url: None }
+        Self {
+            ring,
+            settings,
+            events,
+            cur: None,
+            next: None,
+            fade: None,
+            serial: 0,
+            loudness: crate::vision::loudness,
+            last_url: None,
+            after_fade: None,
+        }
     }
 
     fn rate(&self) -> u32 {
@@ -128,6 +143,7 @@ impl Core {
         self.cur = Some(slot);
         self.next = None;
         self.fade = None;
+        self.after_fade = None;
     }
 
     /// The track that was playing most recently, even if it has finished.
@@ -144,7 +160,9 @@ impl Core {
     /// Queue the track to follow the current one (pre-decoding its first moments).
     pub fn set_next_now(&mut self, stream: Option<(TrackStream, String)>) {
         if self.fade.is_some() {
-            return; // already mixing into one; the new request applies to the one after, which we do not keep
+            // already mixing into one: the request is about the track after the incoming one, so it waits for the fade
+            self.after_fade = stream;
+            return;
         }
         self.next = stream.map(|(mut s, url)| {
             s.fill(self.ring.rate() as usize * NEXT_PREDECODE_MS / 1000);
@@ -152,11 +170,34 @@ impl Core {
         });
     }
 
+    /// The crossfade is over (or was cut short) and the incoming track is the current one: queue what was waiting.
+    fn install_after_fade(&mut self) {
+        if let Some(waiting) = self.after_fade.take() {
+            self.set_next_now(Some(waiting));
+        }
+    }
+
+    /// A following track is queued (or waiting for a crossfade to finish).
+    pub fn has_next(&self) -> bool {
+        self.next.is_some() || self.after_fade.is_some()
+    }
+
     pub fn stop(&mut self) {
         self.ring.flush(0.0, true);
         self.cur = None;
         self.next = None;
         self.fade = None;
+        self.after_fade = None;
+    }
+
+    /// The audible track when it is no longer the one being decoded: the feeder runs up to `AHEAD_MS` ahead of the
+    /// speakers, so near a gapless boundary `cur` is already the following track while the previous one is still
+    /// heard (and its `Ended` has not been reported). A seek is meant for what is heard.
+    pub fn audible_behind_url(&self) -> Option<String> {
+        let playing = self.ring.playing()?;
+        let cur = self.cur.as_ref()?;
+        let is_incoming = self.fade.is_some() && self.next.as_ref().is_some_and(|n| n.meta.serial == playing.serial);
+        (playing.serial != cur.meta.serial && !is_incoming).then(|| playing.url.clone())
     }
 
     /// Nothing left to produce (the ring may still be playing out).
@@ -166,6 +207,11 @@ impl Core {
 
     pub fn current_url(&self) -> Option<&str> {
         self.cur.as_ref().map(|s| s.meta.url.as_str())
+    }
+
+    /// Length of the track being decoded (`None` = there is none, `Some(None)` = it has no known length).
+    pub fn current_duration_ms(&self) -> Option<Option<u64>> {
+        self.cur.as_ref().map(|s| s.meta.duration_ms)
     }
 
     /// True when `url` is the track that is playing right now (so `load(url)` needs to do nothing): it happens
@@ -186,9 +232,21 @@ impl Core {
     /// Seek within the current track. `Err` = the stream could not be repositioned (caller may reopen it).
     pub fn seek(&mut self, ms: u64) -> Result<(), String> {
         if self.fade.take().is_some() {
-            // the incoming track is the one being heard; it becomes the current one
-            self.cur = self.next.take().or(self.cur.take());
-            self.note_current();
+            let audible = self.ring.playing().map(|p| p.serial);
+            if audible.is_some() && audible == self.cur.as_ref().map(|c| c.meta.serial) {
+                // The fade has been produced but none of it has been heard yet (and the outgoing track's `Ended` has
+                // not been reported): the seek is meant for the outgoing track, which simply goes on. The incoming
+                // one is rewound to wait its turn again; whatever was to follow it is not known to the UI yet.
+                self.after_fade = None;
+                if self.next.as_mut().is_some_and(|n| n.stream.seek(0).is_err()) {
+                    self.next = None; // the caller queues it again
+                }
+            } else {
+                // the incoming track is the one being heard; it becomes the current one
+                self.cur = self.next.take().or(self.cur.take());
+                self.note_current();
+                self.install_after_fade();
+            }
         }
         let Some(c) = self.cur.as_mut() else { return Ok(()) };
         c.stream.seek(ms)?;
@@ -252,6 +310,9 @@ impl Core {
             };
             let n = CHUNK.min(f.total - f.done).min(cur.stream.buffered().max(1));
             next.stream.fill(n);
+            if next.stream.starved(n) {
+                return 0; // its read was interrupted by a newer command: wait, do not mix silence in its place
+            }
             let (mut a, mut b) = (Vec::with_capacity(n * 2), Vec::with_capacity(n * 2));
             cur.stream.take(n, cur.gain, &mut a);
             let start = next.stream.position_ms();
@@ -272,6 +333,7 @@ impl Core {
                 self.fade = None;
                 self.cur = self.next.take();
                 self.note_current();
+                self.install_after_fade();
             }
             return n;
         }
@@ -307,11 +369,24 @@ impl Core {
 // ---------------------------------------------------------------------------------------------
 
 enum Cmd {
-    Load { url: String, start_ms: u64 },
-    Opened { token: u64, url: String, result: Result<TrackStream, String> },
+    Load {
+        url: String,
+        start_ms: u64,
+    },
+    Opened {
+        token: u64,
+        url: String,
+        result: Result<TrackStream, String>,
+    },
     SetNext(Option<String>),
-    NextOpened { token: u64, url: String, result: Result<TrackStream, String> },
+    NextOpened {
+        token: u64,
+        url: String,
+        result: Result<TrackStream, String>,
+    },
     Seek(u64),
+    /// `play()` was asked for: if nothing is left to play, the last track starts over.
+    Play,
     Stop,
     Shutdown,
 }
@@ -342,7 +417,9 @@ pub struct Engine {
     ring: Arc<Ring>,
     pub underruns: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
-    _sink: SinkHandle,
+    sink: Option<SinkHandle>,
+    /// Breaks a network read the feeder thread is blocked in, so `stop` / `load` / `seek` never wait for one.
+    interrupt: Arc<Interrupt>,
 }
 
 impl Engine {
@@ -365,11 +442,13 @@ impl Engine {
         let (tx, rx) = channel();
         let core = Core::new(ring.clone(), settings.clone(), ev_tx);
         let (tx2, shared2) = (tx.clone(), shared.clone());
+        let interrupt = Arc::new(Interrupt::default());
+        let interrupt2 = interrupt.clone();
         let thread = std::thread::Builder::new()
             .name("ytm-audio-feed".into())
-            .spawn(move || feeder(core, rx, tx2, shared2))
+            .spawn(move || feeder(core, rx, tx2, shared2, interrupt2))
             .map_err(|e| e.to_string())?;
-        Ok((Engine { tx, ctl, shared, settings, ring, underruns, thread: Some(thread), _sink: sink }, ev_rx))
+        Ok((Engine { tx, ctl, shared, settings, ring, underruns, thread: Some(thread), sink: Some(sink), interrupt }, ev_rx))
     }
 
     pub fn rate(&self) -> u32 {
@@ -377,6 +456,7 @@ impl Engine {
     }
 
     pub fn load(&self, url: &str, start_ms: u64) {
+        self.interrupt.raise();
         self.shared.loading.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Load { url: url.to_owned(), start_ms });
     }
@@ -384,14 +464,17 @@ impl Engine {
         let _ = self.tx.send(Cmd::SetNext(url.map(str::to_owned)));
     }
     pub fn seek(&self, ms: u64) {
+        self.interrupt.raise();
         let _ = self.tx.send(Cmd::Seek(ms));
     }
     pub fn stop(&self) {
+        self.interrupt.raise();
         self.ctl.playing.store(false, Ordering::Relaxed);
         let _ = self.tx.send(Cmd::Stop);
     }
     pub fn play(&self) {
         self.ctl.playing.store(true, Ordering::Relaxed);
+        let _ = self.tx.send(Cmd::Play);
     }
     pub fn pause(&self) {
         self.ctl.playing.store(false, Ordering::Relaxed);
@@ -421,8 +504,9 @@ impl Status {
     pub fn position_ms(&self) -> i64 {
         self.ring.position_ms().round() as i64
     }
+    /// Length of the track that is heard; before anything is heard (or after the last track), of the one that was loaded.
     pub fn duration_ms(&self) -> i64 {
-        self.shared.duration_ms().map_or(0, |d| d as i64)
+        self.ring.audible_duration_ms().unwrap_or_else(|| self.shared.duration_ms()).map_or(0, |d| d as i64)
     }
     pub fn playing(&self) -> bool {
         self.ctl.playing.load(Ordering::Relaxed)
@@ -437,15 +521,30 @@ impl Status {
     pub fn set_playing(&self, v: bool) {
         self.ctl.playing.store(v, Ordering::Relaxed);
     }
+    /// Hand on the track events the output has recorded (see `Ring::deliver_events`); for a status poller.
+    pub fn deliver_events(&self) {
+        self.ring.deliver_events();
+    }
     /// Metadata of the track whose audio is coming out right now.
     pub fn playing_meta(&self) -> Option<Arc<TrackMeta>> {
         self.ring.playing()
     }
 }
 
+impl Engine {
+    /// Close the output device now (quick), without waiting for the feeder thread. The engine is of no use afterwards.
+    pub fn close_output(&mut self) {
+        self.ctl.playing.store(false, Ordering::Relaxed);
+        self.sink = None;
+    }
+}
+
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.interrupt.close(); // a blocked read gives up at once, so the join below is prompt
         let _ = self.tx.send(Cmd::Shutdown);
+        // The device first: the feeder may be in the middle of a network read and take a while to notice.
+        self.sink = None;
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -459,7 +558,9 @@ fn spawn_open(tx: Sender<Cmd>, url: String, rate: u32, token: u64, next: bool) {
     });
 }
 
-fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared>) {
+fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared>, interrupt: Arc<Interrupt>) {
+    // Network reads on this thread give up as soon as a stop / load / seek is on its way (see `Interrupt`).
+    source::install_interrupt(Some(interrupt.clone()));
     let rate = core.rate();
     let ahead = rate as usize * AHEAD_MS / 1000;
     let (mut load_token, mut next_token) = (0u64, 0u64);
@@ -475,6 +576,12 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
         }
         cmds.extend(rx.try_iter());
         for c in cmds {
+            // A track to start over at a position because its stream is gone: (url, ms, keep the queued next track).
+            let mut restart: Option<(String, u64, bool)> = None;
+            if matches!(c, Cmd::Stop | Cmd::Load { .. } | Cmd::Seek(_)) {
+                // taken up: from here on reads on this thread may wait again (unless another such command is queued)
+                interrupt.ack();
+            }
             match c {
                 Cmd::Shutdown => return,
                 Cmd::Stop => {
@@ -484,6 +591,7 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
                     next_url = None;
                     core.stop();
                     core.last_url = None;
+                    shared.set_duration_ms(None);
                     shared.loading.store(false, Ordering::Relaxed);
                     shared.idle.store(true, Ordering::Relaxed);
                 }
@@ -498,6 +606,8 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
                     pending_seek = (start_ms > 0).then_some(start_ms);
                     next_url = None;
                     core.stop();
+                    // the previous track is gone for good: if this one fails to open, `play`/`seek` must not bring it back
+                    core.last_url = None;
                     shared.idle.store(false, Ordering::Relaxed);
                     spawn_open(tx.clone(), url, rate, load_token, false);
                 }
@@ -511,7 +621,7 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
                             shared.set_duration_ms(stream.duration_ms);
                             core.load_now(stream, &url);
                             if let Some(ms) = pending_seek.take() {
-                                seek_with_reopen(&mut core, &url, ms, rate);
+                                seek_with_reopen(&mut core, ms, rate);
                             }
                             if let Some(n) = next_url.clone() {
                                 next_token += 1;
@@ -543,25 +653,54 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
                     }
                 }
                 Cmd::Seek(ms) => {
-                    if let Some(url) = core.current_url().map(str::to_owned) {
-                        seek_with_reopen(&mut core, &url, ms, rate);
+                    if let Some(url) = core.audible_behind_url() {
+                        // The feeder has already moved on to the following track, but the one that is heard (and
+                        // whose `Ended` has not been reported) is still the previous one: the seek is meant for that.
+                        // Its stream is gone, so it starts over at the position; the following track is queued again.
+                        restart = Some((url, ms, true));
+                    } else if core.current_url().is_some() {
+                        let had_next = core.has_next();
+                        seek_with_reopen(&mut core, ms, rate);
+                        if let Some(n) = next_url.clone().filter(|_| had_next && !core.has_next()) {
+                            // a seek back into the outgoing track of a crossfade could not rewind the incoming one
+                            next_token += 1;
+                            spawn_open(tx.clone(), n, rate, next_token, true);
+                        }
                     } else if shared.loading.load(Ordering::Relaxed) {
                         pending_seek = Some(ms);
                     } else if let Some(url) = core.last_url().map(str::to_owned) {
                         // the track has finished: seeking in it (repeat-one, "play again") starts it over from there
-                        load_token += 1;
-                        next_token += 1;
-                        pending_seek = (ms > 0).then_some(ms);
-                        next_url = None;
-                        core.stop();
-                        shared.loading.store(true, Ordering::Relaxed);
-                        shared.idle.store(false, Ordering::Relaxed);
-                        spawn_open(tx.clone(), url, rate, load_token, false);
+                        restart = Some((url, ms, false));
+                    }
+                }
+                Cmd::Play => {
+                    // Nothing left to play (the last track ran out, or broke) and nothing on its way: "play" means
+                    // play the last track again, never a silent engine that claims to be playing.
+                    let nothing = core.is_idle() && core.ring.is_drained() && !shared.loading.load(Ordering::Relaxed);
+                    if let Some(url) = core.last_url().map(str::to_owned).filter(|_| nothing) {
+                        restart = Some((url, 0, false));
                     }
                 }
             }
+            if let Some((url, ms, keep_next)) = restart {
+                load_token += 1;
+                next_token += 1;
+                pending_seek = (ms > 0).then_some(ms);
+                if !keep_next {
+                    next_url = None;
+                }
+                core.stop();
+                core.ring.set_position_ms(ms as f64); // show the target at once, not 0 until the stream is open
+                shared.loading.store(true, Ordering::Relaxed);
+                shared.idle.store(false, Ordering::Relaxed);
+                spawn_open(tx.clone(), url, rate, load_token, false);
+            }
         }
         core.pump(ahead);
+        if let Some(d) = core.current_duration_ms() {
+            // the track being decoded; the audible one (which may still be the previous track) is reported by the ring
+            shared.set_duration_ms(d);
+        }
         if core.is_idle() && core.ring.frames() == 0 && !shared.loading.load(Ordering::Relaxed) {
             shared.idle.store(true, Ordering::Relaxed);
         }
@@ -569,11 +708,14 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
 }
 
 /// Seek; if the demuxer refuses (e.g. after it hit the end of the stream) reopen the URL and seek in the fresh stream.
-fn seek_with_reopen(core: &mut Core, url: &str, ms: u64, rate: u32) {
+fn seek_with_reopen(core: &mut Core, ms: u64, rate: u32) {
     if core.seek(ms).is_ok() {
         return;
     }
-    match TrackStream::open_url(url, rate) {
+    // Asked only now: a seek during a crossfade makes the incoming track the current one, and it is that one's
+    // stream that has to be reopened, not the outgoing track's.
+    let Some(url) = core.current_url().map(str::to_owned) else { return };
+    match TrackStream::open_url(&url, rate) {
         Ok(s) => {
             core.replace_stream(s);
             if let Err(e) = core.seek(ms) {
@@ -655,6 +797,7 @@ pub fn render(urls: &[&str], o: &RenderOpts) -> Result<Rendered, String> {
     loop {
         core.pump(o.rate as usize / 4);
         dsp.render(&mut block);
+        ring.deliver_events(); // the output only records track events; this hands them on
         let before = samples.len() / 2;
         samples.extend_from_slice(&block);
         for e in ev_rx.try_iter() {
@@ -825,6 +968,137 @@ mod tests {
         assert!(core.fade.is_some(), "the fade never started");
         assert!(core.is_playing_url(&b), "the incoming track is already being heard: loading it must be a no-op");
         assert!(!core.is_playing_url("https://example.invalid/some-other-track"), "an unrelated url is still a real load");
+    }
+
+    /// A core with its output, fed from fixture files: `(core, dsp, ring, events)`.
+    fn rig(crossfade_ms: u32) -> (Core, OutputDsp, Arc<Ring>, Receiver<Event>) {
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let ring = Ring::new(48_000, ev_tx.clone());
+        let ctl = Arc::new(Controls::default());
+        ctl.playing.store(true, Ordering::Relaxed);
+        let dsp = OutputDsp::with_eq(ring.clone(), ctl, Arc::new(EqShared::new(EqParams::default())));
+        (Core::new(ring.clone(), Arc::new(Settings::new(crossfade_ms, true, false)), ev_tx), dsp, ring, ev_rx)
+    }
+
+    /// The UI hands over the track after the incoming one while the fade into the incoming one is still running.
+    /// It used to be thrown away, so every second transition had no crossfade (and a gap).
+    #[test]
+    fn a_next_track_that_arrives_during_a_crossfade_is_queued_when_the_fade_is_over() {
+        let (a, b, c) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"), fixture("chirp_opus.webm"));
+        let (mut core, mut dsp, ring, ev_rx) = rig(1000);
+        core.load_now(TrackStream::open_url(&a, 48_000).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, 48_000).unwrap(), b.clone())));
+        let mut block = vec![0f32; 2 * 1024];
+        for _ in 0..2000 {
+            if core.fade.is_some() {
+                break;
+            }
+            core.pump(12_000);
+            dsp.render(&mut block);
+        }
+        assert!(core.fade.is_some(), "the fade never started");
+        core.set_next_now(Some((TrackStream::open_url(&c, 48_000).unwrap(), c.clone())));
+        assert!(core.has_next());
+        for _ in 0..2000 {
+            if core.fade.is_none() {
+                break;
+            }
+            core.pump(12_000);
+            dsp.render(&mut block);
+        }
+        assert_eq!(core.current_url(), Some(b.as_str()), "the incoming track is the current one after the fade");
+        assert_eq!(core.next.as_ref().map(|n| n.meta.url.as_str()), Some(c.as_str()), "the track after it is queued");
+        // and it is really played: three tracks start, the last one is C
+        for _ in 0..4000 {
+            if core.is_idle() {
+                break;
+            }
+            core.pump(12_000);
+            dsp.render(&mut block);
+        }
+        ring.deliver_events();
+        let started: Vec<String> =
+            ev_rx.try_iter().filter_map(|e| if let Event::Started(m) = e { Some(m.url.clone()) } else { None }).collect();
+        assert_eq!(started, [a, b, c]);
+    }
+
+    /// The feeder decodes ahead of the speakers: near a gapless boundary it is already in the next track while the
+    /// previous one is still heard. A seek then is meant for the previous track, and its `Ended` must not get lost.
+    #[test]
+    fn near_a_gapless_boundary_the_audible_track_is_the_seek_target() {
+        let (a, b) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"));
+        let (mut core, mut dsp, ring, ev_rx) = rig(0);
+        core.load_now(TrackStream::open_url(&a, 48_000).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, 48_000).unwrap(), b.clone())));
+        let mut block = vec![0f32; 2 * 1024];
+        dsp.render(&mut block); // nothing queued yet
+        assert_eq!(core.audible_behind_url(), None, "nothing is audible yet");
+        // decode far ahead without playing much: the core moves on to B while A is what comes out
+        core.pump(48_000);
+        dsp.render(&mut block);
+        assert_eq!(core.audible_behind_url(), None, "A is audible and A is being decoded");
+        core.pump(48_000 * 3);
+        assert_eq!(core.current_url(), Some(b.as_str()));
+        assert_eq!(core.audible_behind_url().as_deref(), Some(a.as_str()), "A is still the audible track");
+        // play A out: the moment its Ended is reported it stops being the audible track, and B takes over
+        let mut ended_a = false;
+        for _ in 0..200 {
+            dsp.render(&mut block);
+            ring.deliver_events();
+            for e in ev_rx.try_iter() {
+                if matches!(&e, Event::Ended(m) if m.url == a) {
+                    ended_a = true;
+                    assert!(ring.playing().is_none_or(|p| p.url == b), "an ended track is never reported as audible");
+                }
+            }
+            if ended_a {
+                break;
+            }
+            assert_eq!(core.audible_behind_url().as_deref(), Some(a.as_str()), "until A's Ended, a seek is for A");
+        }
+        assert!(ended_a);
+        dsp.render(&mut block);
+        assert_eq!(core.audible_behind_url(), None, "B is audible and current: a seek is for B");
+        assert!(core.is_playing_url(&b));
+    }
+
+    /// Same boundary with a crossfade: the fade has been produced but not heard, so a seek goes on in the outgoing
+    /// track and the incoming one waits its turn again (from its start).
+    #[test]
+    fn a_seek_before_the_crossfade_is_heard_stays_in_the_outgoing_track() {
+        let (a, b) = (fixture("chirp_opus.webm"), fixture("sine880_opus.webm"));
+        let (mut core, mut dsp, ring, ev_rx) = rig(1000);
+        core.load_now(TrackStream::open_url(&a, 48_000).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, 48_000).unwrap(), b.clone())));
+        let mut block = vec![0f32; 2 * 1024];
+        core.pump(4096);
+        dsp.render(&mut block); // A is audible
+        for _ in 0..2000 {
+            if core.fade.is_some() {
+                break;
+            }
+            core.produce(); // far ahead of the output, nothing consumed: the fade starts unheard
+        }
+        assert!(core.fade.is_some());
+        seek_with_reopen(&mut core, 1000, 48_000); // as the feeder does: a stream that hit its end is reopened
+        assert!(core.fade.is_none());
+        assert_eq!(core.current_url(), Some(a.as_str()), "the outgoing track goes on");
+        assert!((core.position_ms() - 1000.0).abs() < 1.0);
+        assert_eq!(core.next.as_ref().map(|n| n.stream.position_ms()), Some(0.0), "the incoming track starts over later");
+        ring.deliver_events();
+        assert!(!ev_rx.try_iter().any(|e| matches!(e, Event::Ended(_))), "A has not ended");
+        // once the fade is heard, the same seek belongs to the incoming track
+        for _ in 0..4000 {
+            core.pump(12_000);
+            dsp.render(&mut block);
+            if core.fade.is_some() && ring.playing().is_some_and(|p| p.url == b) {
+                break;
+            }
+        }
+        assert!(core.fade.is_some() && ring.playing().is_some_and(|p| p.url == b), "the fade is being heard");
+        core.seek(500).unwrap();
+        assert_eq!(core.current_url(), Some(b.as_str()));
+        assert!((core.position_ms() - 500.0).abs() < 1.0);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use zbus::{Connection, Proxy};
 /// Ask at most this long: the wallet may be waiting for the user to click "allow" / type a passphrase.
 const WALLET_TIMEOUT: Duration = Duration::from_secs(60);
 /// KWallet's idea of who is asking.
-const APP_ID: &str = "ytm";
+const APP_ID: &str = "yqt";
 
 pub fn stores(plasma: bool) -> Vec<Box<dyn SecretStore>> {
     if plasma {
@@ -60,7 +60,7 @@ pub fn needs_prompt(path: &str) -> bool {
 /// including inside the app's tokio runtime.
 fn run_blocking<T: Send + 'static>(fut: impl Future<Output = Result<T, PlatformError>> + Send + 'static) -> Result<T, PlatformError> {
     std::thread::Builder::new()
-        .name("ytm-secrets".into())
+        .name("yqt-secrets".into())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()

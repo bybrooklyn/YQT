@@ -20,9 +20,15 @@ const FORMAT: u32 = 1;
 
 /// Cache key: video id + normalised title/artist + the provider set + the junk threshold, so changing the
 /// settings never serves an answer that those settings would not have produced.
+#[cfg(test)]
 pub fn key(q: &Query, providers: &[&str], min_lines: usize) -> String {
+    key_with(q, providers, min_lines, "")
+}
+
+/// [`key`] plus `settings`: every other setting that changes the answer (see [`settings_tag`]).
+pub fn key_with(q: &Query, providers: &[&str], min_lines: usize, settings: &str) -> String {
     let text = format!(
-        "{FORMAT}|{}|{}|{}|{}|{}|{min_lines}",
+        "{FORMAT}|{}|{}|{}|{}|{}|{min_lines}|{settings}",
         q.video_id,
         super::rank::normalize(&q.title),
         super::rank::normalize(&q.artist),
@@ -30,6 +36,11 @@ pub fn key(q: &Query, providers: &[&str], min_lines: usize) -> String {
         providers.join(",")
     );
     Sha1::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The settings (besides the provider list and `min_lines`) that decide which lyrics win or where they come from.
+pub fn settings_tag(cfg: &crate::config::Lyrics) -> String {
+    format!("{}|{}|{}", cfg.prefer_synced, cfg.lrclib_url.trim(), cfg.netease_url.trim())
 }
 
 pub fn unix_now() -> u64 {
@@ -172,6 +183,16 @@ mod tests {
         let mut other = q("x");
         other.title = "song".into();
         assert_eq!(k, key(&other, &["LRCLIB"], 4));
+    }
+
+    #[test]
+    fn key_follows_the_synced_preference_and_the_service_addresses() {
+        let cfg = crate::config::Lyrics::default();
+        let k = |c: &crate::config::Lyrics| key_with(&q("x"), &["LRCLIB"], 4, &settings_tag(c));
+        assert_eq!(k(&cfg), k(&cfg.clone()));
+        assert_ne!(k(&cfg), k(&crate::config::Lyrics { prefer_synced: !cfg.prefer_synced, ..cfg.clone() }));
+        assert_ne!(k(&cfg), k(&crate::config::Lyrics { lrclib_url: "https://lrc.example".into(), ..cfg.clone() }));
+        assert_ne!(k(&cfg), k(&crate::config::Lyrics { netease_url: "https://ne.example".into(), ..cfg.clone() }));
     }
 
     #[test]

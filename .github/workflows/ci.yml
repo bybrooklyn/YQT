@@ -23,7 +23,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qt6-base-dev qt6-declarative-dev qt6-multimedia-dev qt6-declarative-dev-tools \
             libkf6kirigami-dev qml6-module-org-kde-kirigami qml6-module-org-kde-qqc2-desktop-style \
-            libgl1-mesa-dev lld just
+            libgl1-mesa-dev libasound2-dev pkg-config lld just
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test

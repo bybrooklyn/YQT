@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -22,7 +22,7 @@ Kirigami.Page {
     function parse(json) { try { return JSON.parse(json) } catch (e) { return null } }
 
     // ---- lyrics state -------------------------------------------------------------------
-    property var synced: []               // [[ms, "line"], ...]
+    property var synced: []               // [[ms, "line", endMs, isGap, fillMs], ...] (src/lyrics/layout.rs)
     property string plain
     property string lyricsSource
     property string lyricsError
@@ -46,7 +46,9 @@ Kirigami.Page {
 
     Connections {
         target: Player
-        function onVideoIdChanged() { page.lyricsFor = ""; if (page.tab === "lyrics") page.fetchLyrics() }
+        // Later, not at once: the title, artist and duration of the new track are set around the video id, and the
+        // lookup needs all of them to be the new track's.
+        function onVideoIdChanged() { page.lyricsFor = ""; if (page.tab === "lyrics") Qt.callLater(page.fetchLyrics) }
     }
     Connections {
         target: Backend
@@ -85,6 +87,7 @@ Kirigami.Page {
         QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: rowMenu.row !== Player.index; onTriggered: QueueModel.playRowNext(rowMenu.row) }
         QQC2.MenuSeparator {}
         QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: !!rowMenu.song.artistId; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: rowMenu.song.artistId, title: rowMenu.song.artist}) }
+        QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play album"); visible: !!rowMenu.song.albumId; height: visible ? implicitHeight : 0; onTriggered: Player.playAlbum(JSON.stringify(rowMenu.song)) }
         QQC2.MenuItem { icon.name: "media-optical-audio"; text: qsTr("Go to album"); visible: !!rowMenu.song.albumId; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "album", browseId: rowMenu.song.albumId, title: rowMenu.song.title}) }
         QQC2.MenuItem {
             visible: Backend.loggedIn; height: visible ? implicitHeight : 0
@@ -335,8 +338,9 @@ Kirigami.Page {
                             readonly property real progress: {
                                 if (!active) return 0
                                 const t0 = modelData[0]
-                                const span = modelData.length > 4 ? modelData[4] : Math.max(1, modelData[2] - t0)
-                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / Math.max(1, span)))
+                                const span = modelData.length > 4 ? modelData[4] : modelData[2] - t0
+                                if (!(span > 0)) return 0   // a row without timing (never NaN: that would leave the fill stuck)
+                                return Math.max(0, Math.min(1, (applicationWindow().smoothPosition + AppConfig.lyricsLeadMs - t0) / span))
                             }
 
                             QQC2.Label {
@@ -357,7 +361,7 @@ Kirigami.Page {
                                 // Karaoke: the same text in the highlight colour, revealed left to right as the line is sung.
                                 // Only for a single-line lyric (a wrapped one just keeps the tint).
                                 Item {
-                                    visible: AppConfig.lyricsKaraoke && lineItem.active && label.lineCount === 1
+                                    visible: AppConfig.lyricsKaraoke && lineItem.active && label.lineCount === 1 && !lineItem.modelData[3]
                                     anchors.verticalCenter: parent.verticalCenter
                                     x: (label.width - label.contentWidth) / 2
                                     width: label.contentWidth * lineItem.progress

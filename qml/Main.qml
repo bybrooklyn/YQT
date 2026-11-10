@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import QtCore
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import org.kde.kirigami as Kirigami
 
 Kirigami.ApplicationWindow {
     id: root
 
-    title: Player.hasTrack ? qsTr("%1 — YQT").arg(Player.title) : qsTr("YQT")
+    title: Player.hasTrack ? Player.title : qsTr("YQT")
     width: Kirigami.Units.gridUnit * 50
     height: Kirigami.Units.gridUnit * 36
     minimumWidth: Kirigami.Units.gridUnit * 20
@@ -21,9 +21,28 @@ Kirigami.ApplicationWindow {
     Connections {
         target: Backend
         function onLoggedInChanged() { root.pageCache = ({}) }
+        function onSessionRenewed() { root.pageCache = ({}) }
+        // The stored sign-in stopped working: Home and the Library now show less, so say why.
+        function onSessionExpired() {
+            root.report(qsTr("Your YouTube Music session expired"), qsTr("Sign in again from Settings."))
+        }
         // A like YouTube refused: the heart has already been put back; say why instead of failing silently.
         function onLikeFailed(videoId, message) {
-            root.showPassiveNotification(qsTr("Couldn’t update your liked songs: %1").arg(message.split("\n\n")[0]), "long")
+            root.report(qsTr("Couldn’t update your liked songs"), message.split("\n\n")[0])
+        }
+    }
+    // Errors are the only thing the app ever announces. While the window is being looked at it says so itself;
+    // otherwise (background, minimised, closed to the tray) the desktop's notification does.
+    function report(summary, detail) {
+        if (!Backend.notifyError(summary, detail, root.active))
+            root.showPassiveNotification(detail.length > 0 ? summary + ": " + detail : summary, "long")
+    }
+    Connections {
+        target: Player
+        // A song that could not be played: the bar already shows why, so only the desktop needs telling.
+        function onErrorChanged() {
+            if (Player.error.length > 0 && !root.active)
+                Backend.notifyError(qsTr("Couldn’t play “%1”").arg(Player.title), Player.error.split("\n\n")[0], false)
         }
     }
     // Audio goes through the Playback seam (Playback.qml): the Rust engine or Qt Multimedia, chosen in Settings
@@ -82,7 +101,8 @@ Kirigami.ApplicationWindow {
         Player.syncMpris(media.playing, media.position, media.duration)
     }
     function previousTrack() {
-        if (media.position > AppConfig.restartThresholdMs || Player.index <= 0) media.seek(0); else Player.previous()
+        // Player.previous() knows about the shuffle history; it answers false when there is nothing to go back to.
+        if (media.position > AppConfig.restartThresholdMs || !Player.previous()) media.seek(0)
     }
     Timer { interval: 1000; repeat: true; running: Player.hasTrack; onTriggered: root.syncMpris() }
 
@@ -104,7 +124,8 @@ Kirigami.ApplicationWindow {
             case "play": if (Player.hasTrack) media.play(); break
             case "pause": media.pause(); break
             case "playpause": root.togglePlay(); break
-            case "stop": media.stop(); break
+            // Pause at the start rather than unload: a later Play must be able to resume this track.
+            case "stop": media.pause(); media.seek(0); break
             case "next": Player.next(); break
             case "previous": root.previousTrack(); break
             case "seek": media.seek(media.position + arg); break
@@ -120,7 +141,9 @@ Kirigami.ApplicationWindow {
         function onShuffleChanged() { root.syncMpris() }
         function onRepeatChanged() { root.syncMpris() }
         function onVolumeChanged() { root.syncMpris() }
-        function onTitleChanged() { root.syncMpris() }
+        // The track id is the last thing the Player sets for a new track (and clears when nothing is left), so the
+        // metadata goes out once and whole.
+        function onVideoIdChanged() { root.syncMpris() }
     }
 
     function saveSession() {
@@ -159,7 +182,19 @@ Kirigami.ApplicationWindow {
     Shortcut { sequence: root.keys.volume_down || ""; enabled: !!root.keys.volume_down; onActivated: root.nudgeVolume(-0.05) }
     Shortcut { sequence: root.keys.seek_forward || ""; enabled: !!root.keys.seek_forward && !root.typing; onActivated: media.seek(media.position + 5000) }
     Shortcut { sequence: root.keys.seek_back || ""; enabled: !!root.keys.seek_back && !root.typing; onActivated: media.seek(media.position - 5000) }
-    Shortcut { sequence: "Media Play"; onActivated: root.togglePlay() }
+    // The mouse's side buttons do what the toolbar's back and forward arrows do. It lies over the whole window but
+    // takes only those two buttons, so clicks, hover and the wheel reach what is underneath.
+    MouseArea {
+        parent: QQC2.Overlay.overlay
+        anchors.fill: parent
+        acceptedButtons: Qt.BackButton | Qt.ForwardButton
+        onClicked: mouse => {
+            if (mouse.button === Qt.BackButton) pageStack.goBack()
+            else pageStack.goForward()
+        }
+    }
+    // Media keys normally arrive through the desktop (MPRIS); these catch them where the window gets the key itself.
+    Shortcut { sequences: ["Media Play", "Media Pause", "Toggle Media Play/Pause"]; onActivated: root.togglePlay() }
     Shortcut { sequence: "Media Next"; onActivated: Player.next() }
     Shortcut { sequence: "Media Previous"; onActivated: root.previousTrack() }
 
@@ -175,6 +210,8 @@ Kirigami.ApplicationWindow {
     }
 
     function go(name) {
+        // The queue opens on top of the current page (like the lyrics do) instead of replacing it.
+        if (name === "queue") { showNowPlaying("queue"); return }
         pageStack.clear()
         Qt.callLater(Backend.trimMemory)   // after the old pages are gone
         switch (name) {
@@ -194,9 +231,6 @@ Kirigami.ApplicationWindow {
                 searchable: false,
                 emptyText: qsTr("Nothing in your library yet")
             })
-            break
-        case "queue":
-            showNowPlaying("queue")
             break
         case "downloads":
             pageStack.push(Qt.resolvedUrl("DownloadsPage.qml"))
@@ -232,6 +266,28 @@ Kirigami.ApplicationWindow {
         pageStack.push(Qt.resolvedUrl("NowPlayingPage.qml"), {tab: tab})
     }
     function showLyrics() { showNowPlaying("lyrics") }
+
+    // The standard Kirigami About page (opened from Settings), fed with what KAboutData would hold.
+    readonly property var aboutData: ({
+        displayName: "YQT",
+        productName: "yqt",
+        componentName: "yqt",
+        programLogo: "qrc:/yqt/logo.svg",
+        shortDescription: qsTr("A tiny native YouTube Music client"),
+        homepage: "https://github.com/bybrooklyn/ytm-qt",
+        bugAddress: "https://github.com/bybrooklyn/ytm-qt/issues",
+        version: Qt.application.version,
+        otherText: qsTr("Lyrics from LRCLIB, NetEase and YouTube Music. Not affiliated with YouTube or Google."),
+        authors: [{name: "bybrooklyn", task: qsTr("Author"), emailAddress: "", webAddress: "https://github.com/bybrooklyn", ocsUsername: ""}],
+        credits: [],
+        translators: [],
+        licenses: [{name: "GNU General Public License v3.0", text: qsTr("This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License, version 3, as published by the Free Software Foundation. It comes with no warranty. The full text is at https://www.gnu.org/licenses/gpl-3.0.html"), spdx: "GPL-3.0-only"}],
+        copyrightStatement: "© bybrooklyn",
+        desktopFileName: "dev.bybrooklyn.yqt"
+    })
+    function showAbout() {
+        pageStack.push(Qt.createComponent("org.kde.kirigami", "AboutPage"), {aboutData: root.aboutData})
+    }
 
     /// Pressing the bottom bar: while the player is open, go back to the page you were on; otherwise open the player.
     function toggleNowPlaying() {

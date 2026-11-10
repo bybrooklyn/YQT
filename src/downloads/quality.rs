@@ -43,6 +43,23 @@ pub fn file_name(id: &str, ext: &str) -> Option<String> {
     (valid_id(id) && EXTS.contains(&ext)).then(|| format!("{id}.{ext}"))
 }
 
+/// The partial-file name of one particular stream: `<id>.<itag>-<length>.<ext>.part`. The itag and the announced
+/// length are part of the name so that a partial is only ever resumed with bytes of the very same stream (another
+/// quality of the same container must start its own file).
+pub fn part_name(id: &str, ext: &str, itag: u32, content_length: Option<u64>) -> Option<String> {
+    (valid_id(id) && EXTS.contains(&ext)).then(|| format!("{id}.{itag}-{}.{ext}.part", content_length.unwrap_or(0)))
+}
+
+/// Is `name` a partial file of `id` (any stream, including the older `<id>.<ext>.part` form)?
+pub fn is_part_of(name: &str, id: &str) -> bool {
+    // `<id>.` + at least one more name part + `.part`
+    valid_id(id)
+        && name.len() > id.len() + ".part".len() + 1
+        && name.starts_with(id)
+        && name.as_bytes()[id.len()] == b'.'
+        && name.ends_with(".part")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +94,24 @@ mod tests {
         assert_eq!(file_name("../../../etc", "m4a"), None);
         assert_eq!(file_name("dQw4w9WgXcQ", "../x"), None);
         assert_eq!(file_name("dQw4w9WgXcQ", "sh"), None);
+    }
+
+    #[test]
+    fn partial_names_identify_the_stream() {
+        let a = part_name("dQw4w9WgXcQ", "m4a", 140, Some(3_400_000)).unwrap();
+        let b = part_name("dQw4w9WgXcQ", "m4a", 139, Some(1_300_000)).unwrap();
+        assert_eq!(a, "dQw4w9WgXcQ.140-3400000.m4a.part");
+        assert_ne!(a, b, "another quality in the same container is another file");
+        assert_eq!(part_name("dQw4w9WgXcQ", "m4a", 140, None).as_deref(), Some("dQw4w9WgXcQ.140-0.m4a.part"));
+        assert_eq!(part_name("../../../etc", "m4a", 1, None), None);
+        assert_eq!(part_name("dQw4w9WgXcQ", "../x", 1, None), None);
+        for ours in [a.as_str(), b.as_str(), "dQw4w9WgXcQ.m4a.part"] {
+            assert!(is_part_of(ours, "dQw4w9WgXcQ"), "{ours}");
+        }
+        for other in ["dQw4w9WgXcQ.m4a", "dQw4w9WgXcQ.part", "dQw4w9WgXcQx.m4a.part", "aaaaaaaaaaa.m4a.part", "movie.mkv.part", ""] {
+            assert!(!is_part_of(other, "dQw4w9WgXcQ"), "{other}");
+        }
+        assert!(!is_part_of("../x.part", "../x"));
     }
 
     #[test]

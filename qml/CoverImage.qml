@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
 import QtQuick.Effects
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import org.kde.kirigami as Kirigami
 
 // Album/track cover that never looks broken: a neutral placeholder shows while the image loads, when there is
@@ -35,7 +35,9 @@ Item {
     Image {
         id: img
         anchors.fill: parent
-        source: root.source
+        // Through the cover cache: the local copy when there is one (so covers show offline), else the address itself,
+        // which also starts caching it. Asked once per source, so a cover never reloads mid-view when its copy lands.
+        source: root.source.length > 0 ? Covers.url(root.source) : ""
         sourceSize: Qt.size(root.decode, root.decode)
         asynchronous: true
         cache: true

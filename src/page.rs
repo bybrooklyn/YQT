@@ -72,7 +72,7 @@ fn now_ms() -> u64 {
 }
 
 fn cache_ttl_ms() -> u64 {
-    crate::config::get().library.page_cache_secs.saturating_mul(1000)
+    crate::config::current().library.page_cache_secs.saturating_mul(1000) // read per use: follows Settings
 }
 
 // ---- roles -------------------------------------------------------------------------------------------------
@@ -96,7 +96,8 @@ const ROLE_NAMES: [&str; 16] = [
     "placeholder",
     "playable",
 ];
-const UPDATE_ROLES: [i32; 3] = [ROLE_BASE, ROLE_BASE + 1, ROLE_BASE + 6];
+// what a row replaced in place may change (the Liked-music swap): title, subtitle, browseId, thumbnail, placeholder
+const UPDATE_ROLES: [i32; 5] = [ROLE_BASE, ROLE_BASE + 1, ROLE_BASE + 5, ROLE_BASE + 6, ROLE_BASE + 14];
 
 fn kind_name(k: ItemKind) -> &'static str {
     match k {
@@ -122,7 +123,10 @@ fn page_value(hero: Option<&Hero>, rows: &[Row], has_more: bool) -> Value {
     let mut sections: Vec<Section> = Vec::new();
     for r in rows {
         match sections.last_mut() {
-            Some(s) if s.id == r.section_id && s.style == r.style => s.items.push(r.item.clone()),
+            // (the titles too: ids are slugs, and two differently titled neighbours can share one - e.g. "")
+            Some(s) if s.id == r.section_id && s.style == r.style && s.title == r.section && s.subtitle == r.section_subtitle => {
+                s.items.push(r.item.clone())
+            }
             _ => sections.push(Section {
                 id: r.section_id.clone(),
                 title: r.section.clone(),
@@ -168,6 +172,35 @@ fn page_songs(page: &PageData) -> Vec<Item> {
         .filter(|i| i.kind == ItemKind::Song && i.is_actionable())
         .cloned()
         .collect()
+}
+
+/// Which queue a feed appends the rest of a long list to: the queue's epoch (`Player::queue_epoch`) as it is right
+/// after the "play" that started the feed. `None` before that is known, and again once that queue has been replaced
+/// (so a feed never appends to a queue that is not the one it was started for).
+type FedQueue = Arc<Mutex<Option<i64>>>;
+
+/// Note which queue there is once everything already asked of the player has happened (requests reach the player in
+/// order, so this comes after the `play_many` that precedes it and before any `append_fed` that follows).
+fn mark_queue() -> FedQueue {
+    let queue = FedQueue::default();
+    let slot = queue.clone();
+    crate::player::with_player(move |p| *slot.lock().unwrap() = Some(p.queue_epoch()));
+    queue
+}
+
+/// Append `songs` to the marked queue if it is still the queue; if not, the mark is cleared. Answers through `done`.
+fn append_fed(queue: &FedQueue, songs: Vec<Value>, done: Option<tokio::sync::oneshot::Sender<bool>>) {
+    let queue = queue.clone();
+    crate::player::with_player(move |p| {
+        let mut slot = queue.lock().unwrap();
+        let alive = slot.is_some_and(|epoch| p.enqueue_fed(epoch, songs));
+        if !alive {
+            *slot = None;
+        }
+        if let Some(done) = done {
+            let _ = done.send(alive);
+        }
+    });
 }
 
 // ---- the QObject ---------------------------------------------------------------------------------------------
@@ -397,6 +430,8 @@ pub struct PageControllerRust {
     home_any: bool,
     home_error: Option<AppError>,
     suggest_gen: u64,
+    /// The queue the feed of this page appends to (see `FedQueue`).
+    fed_queue: FedQueue,
 }
 
 impl qobject::PageController {
@@ -601,6 +636,9 @@ impl qobject::PageController {
     }
 
     fn store_in_cache(&self, has_more: bool) {
+        if self.picker {
+            return; // the picker's list has Liked music filtered out: it is not the Library page
+        }
         let (target, query, filter) = (self.target.to_string(), self.query.to_string(), self.filter.to_string());
         let eff = pager::effective_target(&target, &filter);
         if let Some(key) = PageCache::key(&eff, &query, "") {
@@ -679,6 +717,11 @@ impl qobject::PageController {
                         self.as_mut().apply(change);
                     }
                 }
+                // The queue this page was feeding has been replaced (or there is no player): the feed is over. (The mark
+                // is always set by now: `mark_queue` was asked of the player before this page was even requested.)
+                if self.pager.feed_queue() && self.fed_queue.lock().unwrap().is_none() {
+                    self.as_mut().st_mut().pager.set_feed_queue(false);
+                }
                 let feed: Vec<Value> = if self.pager.feed_queue() {
                     rows.iter().filter(|r| r.is_song()).map(|r| song_value(&r.item)).collect()
                 } else {
@@ -691,7 +734,8 @@ impl qobject::PageController {
                 self.as_mut().st_mut().pager.more_done(page.pager, page.has_more);
                 self.as_mut().sync_counts();
                 if !feed.is_empty() {
-                    crate::player::with_player(move |p| p.enqueue_many(feed));
+                    // only into the queue the feed was started for
+                    append_fed(&self.fed_queue, feed, None);
                 }
                 // feeding the queue ignores the scroll position, but still one request at a time
                 self.as_mut().continue_feed();
@@ -780,14 +824,20 @@ impl qobject::PageController {
 
     fn play_item(self: Pin<&mut Self>, i: i32) {
         let Some(row) = self.song_at(i) else { return };
-        self.play_row_item(&row.item);
+        // the clicked row itself, so the second copy of a song that is in the list twice starts from there
+        let nth = self.rows.iter().take(i.max(0) as usize).filter(|r| r.is_song()).count();
+        self.play_row_item(&row.item, Some(nth));
     }
 
     /// Play a song of this page: on a collection page the whole list from there, otherwise just that song.
-    fn play_row_item(&self, item: &Item) {
+    /// `nth` is its position among the page's songs when the caller knows it.
+    fn play_row_item(&self, item: &Item, nth: Option<usize>) {
         if self.collection {
             let songs = self.assembly.songs();
-            let start = songs.iter().position(|s| s.video_id == item.video_id).unwrap_or(0);
+            let start = nth
+                .filter(|n| songs.get(*n).is_some_and(|s| s.video_id == item.video_id))
+                .or_else(|| songs.iter().position(|s| s.video_id == item.video_id))
+                .unwrap_or(0);
             let values: Vec<Value> = songs.iter().map(song_value).collect();
             crate::player::with_player(move |p| p.play_many(values, start));
         } else {
@@ -798,7 +848,7 @@ impl qobject::PageController {
 
     fn play_song(self: Pin<&mut Self>, video_id: &QString) {
         if let Some(row) = self.song_by_id(&video_id.to_string()) {
-            self.play_row_item(&row.item);
+            self.play_row_item(&row.item, None);
         }
     }
 
@@ -821,12 +871,17 @@ impl qobject::PageController {
         if !matches!(kind.as_str(), "album" | "playlist") || id.is_empty() {
             return;
         }
-        let fut = source().load(Request { target: format!("{kind}:{id}"), ..Default::default() });
+        let src = source();
+        let fut = src.load(Request { target: format!("{kind}:{id}"), ..Default::default() });
         st().rt.spawn(async move {
             match fut.await {
                 Ok(page) => {
+                    let mut pager = page.pager.filter(|_| page.has_more);
                     let songs = page_songs(&page);
                     if songs.is_empty() {
+                        if let Some(id) = pager {
+                            pages::forget(id);
+                        }
                         return;
                     }
                     let start = if shuffle { rand::random_range(0..songs.len()) } else { 0 };
@@ -837,6 +892,23 @@ impl qobject::PageController {
                         }
                         p.play_many(values, start);
                     });
+                    // The rest of a long list follows into that queue, page by page, until the list ends or the queue
+                    // is replaced; either way nothing is left behind for this list.
+                    let queue = mark_queue();
+                    while let Some(id) = pager.take() {
+                        let Ok(next) = src.more(id).await else {
+                            pages::forget(id);
+                            break;
+                        };
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        append_fed(&queue, page_songs(&next).iter().map(song_value).collect(), Some(tx));
+                        pager = next.pager.filter(|_| next.has_more);
+                        if !rx.await.unwrap_or(false) {
+                            if let Some(id) = pager.take() {
+                                pages::forget(id);
+                            }
+                        }
+                    }
                 }
                 Err(e) => errors::toast(&e),
             }
@@ -884,6 +956,8 @@ impl qobject::PageController {
     }
 
     fn start_feed_queue(mut self: Pin<&mut Self>) {
+        // the queue as it is after the play request that came just before this (see `mark_queue`)
+        self.as_mut().st_mut().fed_queue = mark_queue();
         self.as_mut().st_mut().pager.set_feed_queue(true);
         self.continue_feed();
     }
@@ -998,6 +1072,21 @@ mod tests {
         );
         assert_eq!((v["hasMore"].as_bool(), v["hero"].is_null()), (Some(true), true));
         assert_eq!(secs[0]["items"][1]["videoId"], "2", "items keep their camelCase fields");
+    }
+
+    #[test]
+    fn neighbouring_sections_that_share_an_id_but_not_a_title_stay_apart() {
+        // slugs of non-ASCII titles are all "": the id alone cannot tell such sections apart
+        let mut a = row("", SectionStyle::Cards, "1");
+        a.section = "日本語".into();
+        let mut b = row("", SectionStyle::Cards, "2");
+        b.section = "中文".into();
+        let v = page_value(None, &[a, b], false);
+        assert_eq!(v["sections"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            UPDATE_ROLES.map(|r| ROLE_NAMES[(r - ROLE_BASE) as usize]),
+            ["title", "subtitle", "browseId", "thumbnail", "placeholder"]
+        );
     }
 
     #[test]

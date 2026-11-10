@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -10,7 +10,12 @@ import org.kde.kirigami as Kirigami
 Kirigami.Dialog {
     id: dlg
     property var song: ({})
-    property var playlists: []           // [{id, title, subtitle}]
+    // {browseId, title, subtitle} rows. A list model, appended to page by page: handing the view a new array for every
+    // page made it jump back to the top.
+    property ListModel playlists: ListModel {}
+    property int openings: 0             // counts openings: an answer for an earlier one must not act on this one
+    property int addFor: -1              // the opening the running "add" belongs to
+    property string addTitle             // … and the song it adds
     property string message
     property bool failed: false
     property bool busy: false
@@ -25,15 +30,23 @@ Kirigami.Dialog {
     preferredWidth: Kirigami.Units.gridUnit * 22
 
     function parse(json) { try { return JSON.parse(json) } catch (e) { return null } }
-    function entries(items) { return items.map(p => ({id: p.browseId, title: p.title, subtitle: p.subtitle})) }
+    function addEntries(items) {
+        for (const p of items) playlists.append({browseId: p.browseId || "", title: p.title || "", subtitle: p.subtitle || ""})
+    }
     function loadMore() {
         if (hasMore && pagerId > 0 && moreReq < 0 && !busy) moreReq = Backend.more(pagerId)
     }
 
     onOpened: {
-        message = ""; failed = false; playlists = []; busy = true
+        openings += 1
+        message = ""; failed = false; playlists.clear(); busy = true
         hasMore = false; pagerId = 0; moreReq = -1
         listReq = Backend.myPlaylists()
+    }
+    // The Rust side keeps the list's pager until told to forget it.
+    onClosed: {
+        if (pagerId > 0) Backend.dropPager(pagerId)
+        pagerId = 0; hasMore = false; listReq = -1; moreReq = -1
     }
 
     property QtObject backendWatcher: Connections {
@@ -44,22 +57,25 @@ Kirigami.Dialog {
                 if (err) { dlg.failed = true; dlg.message = err.split("\n\n")[0]; return }
                 const res = dlg.parse(json)
                 if (!res) { dlg.failed = true; dlg.message = qsTr("Got an unreadable answer from the app."); return }
-                dlg.playlists = dlg.entries(res.items || [])
+                dlg.addEntries(res.items || [])
                 dlg.pagerId = res.pager || 0
+                if (dlg.pagerId > 0) Backend.holdPager(dlg.pagerId)
                 dlg.hasMore = !!res.more
             } else if (id === dlg.moreReq) {
                 dlg.moreReq = -1
                 if (err) { dlg.hasMore = false; return }
                 const res = dlg.parse(json)
                 if (!res) { dlg.hasMore = false; return }
-                dlg.playlists = dlg.playlists.concat(dlg.entries(res.items || []))
+                dlg.addEntries(res.items || [])
                 dlg.hasMore = !!res.more
             } else if (id === dlg.addReq) {
-                dlg.busy = false
-                dlg.failed = !!err
-                if (err) { dlg.message = err.split("\n\n")[0]; return }
-                dlg.close()
-                applicationWindow().showPassiveNotification(qsTr("Added “%1”").arg(dlg.song.title))
+                dlg.addReq = -1
+                // The dialog may have been closed and opened for another song since: then only say what happened.
+                const current = dlg.addFor === dlg.openings && dlg.visible
+                if (current) { dlg.busy = false; dlg.failed = !!err }
+                if (err) { if (current) dlg.message = err.split("\n\n")[0]; return }
+                if (current) dlg.close()
+                applicationWindow().showPassiveNotification(qsTr("Added “%1”").arg(dlg.addTitle))
             }
         }
     }
@@ -83,17 +99,24 @@ Kirigami.Dialog {
             onContentYChanged: if (contentHeight - contentY - height < height) dlg.loadMore()
             onContentHeightChanged: if (contentHeight - contentY - height < height) dlg.loadMore()
             delegate: QQC2.ItemDelegate {
-                required property var modelData
+                id: entry
+                required property string browseId
+                required property string title
+                required property string subtitle
                 width: ListView.view.width
-                text: modelData.title
+                text: entry.title
                 icon.name: "view-media-playlist"
                 enabled: !dlg.busy
                 contentItem: ColumnLayout {
                     spacing: 0
-                    QQC2.Label { text: modelData.title; elide: Text.ElideRight; Layout.fillWidth: true }
-                    QQC2.Label { text: modelData.subtitle; font: Kirigami.Theme.smallFont; opacity: 0.7; visible: text.length > 0; elide: Text.ElideRight; Layout.fillWidth: true }
+                    QQC2.Label { text: entry.title; elide: Text.ElideRight; Layout.fillWidth: true }
+                    QQC2.Label { text: entry.subtitle; font: Kirigami.Theme.smallFont; opacity: 0.7; visible: text.length > 0; elide: Text.ElideRight; Layout.fillWidth: true }
                 }
-                onClicked: { dlg.busy = true; dlg.message = ""; dlg.addReq = Backend.addToPlaylist(modelData.id, dlg.song.videoId) }
+                onClicked: {
+                    dlg.busy = true; dlg.message = ""
+                    dlg.addFor = dlg.openings; dlg.addTitle = dlg.song.title || ""
+                    dlg.addReq = Backend.addToPlaylist(entry.browseId, dlg.song.videoId)
+                }
             }
         }
     }

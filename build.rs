@@ -2,7 +2,7 @@
 use cxx_qt_build::{CxxQtBuilder, QmlModule};
 
 fn main() {
-    CxxQtBuilder::new_qml_module(QmlModule::new("org.kde.ytm").qml_files([
+    CxxQtBuilder::new_qml_module(QmlModule::new("dev.bybrooklyn.yqt").qml_files([
         "qml/Main.qml",
         "qml/Playback.qml",
         "qml/RustPlayback.qml",
@@ -14,6 +14,7 @@ fn main() {
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",
+        "qml/ShortcutField.qml",
         "qml/DownloadsPage.qml",
         "qml/MiniPlayer.qml",
         "qml/TrayController.qml",

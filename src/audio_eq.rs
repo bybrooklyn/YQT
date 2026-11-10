@@ -180,6 +180,12 @@ impl qobject::Equalizer {
                 }
             }
             SAVE_WAITING.store(false, Ordering::SeqCst);
+            // A change that arrived while the file was being written saw "a saver is waiting" and left: its state
+            // is in LATEST and nobody else will write it, so take the job back instead of leaving.
+            let more = LATEST.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+            if more && !SAVE_WAITING.swap(true, Ordering::SeqCst) {
+                continue;
+            }
             break;
         });
     }

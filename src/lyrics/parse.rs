@@ -20,12 +20,14 @@ pub fn parse_lrc(lrc: &str) -> Vec<Line> {
             let Some((tag, after)) = r.split_once(']') else { break };
             if let Some(ms) = parse_stamp(tag) {
                 stamps.push(ms);
-            } else {
+            } else if stamps.is_empty() {
                 if let Some(v) = tag.trim().strip_prefix("offset:") {
                     offset_ms = v.trim().trim_start_matches('+').parse().unwrap_or(0);
                 }
                 // metadata tag such as [ar:Artist]: the whole line is metadata
-                stamps.clear();
+                break;
+            } else {
+                // a bracket after a stamp is part of the lyric ("[00:20.00][Chorus] la la"), not metadata
                 break;
             }
             rest = after;
@@ -41,7 +43,7 @@ pub fn parse_lrc(lrc: &str) -> Vec<Line> {
     if offset_ms != 0 {
         // A positive offset makes the lyrics appear sooner (LRC convention).
         for (ms, _) in &mut out {
-            *ms = (*ms - offset_ms).max(0);
+            *ms = ms.saturating_sub(offset_ms).max(0);
         }
     }
     out.sort_by_key(|(ms, _)| *ms); // stable: equal stamps keep file order
@@ -61,7 +63,7 @@ fn parse_stamp(tag: &str) -> Option<i64> {
         return None;
     }
     let s: f64 = s.parse().ok()?;
-    Some(m.checked_mul(60_000)? + (s * 1000.0).round() as i64)
+    m.checked_mul(60_000)?.checked_add((s * 1000.0).round() as i64)
 }
 
 /// Remove enhanced-LRC word stamps `<mm:ss.xx>`, keeping the words.
@@ -136,6 +138,21 @@ mod tests {
             let want: Vec<Line> = want.iter().map(|(m, t)| (*m, (*t).to_owned())).collect();
             assert_eq!(got, want, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn a_bracket_after_a_stamp_is_lyric_text() {
+        let l = parse_lrc("[00:20.00][Chorus] la la\n[00:25.00][x2]\n[00:01.00][00:02.00][Intro]");
+        assert_eq!(l, [(1000, "[Intro]".to_owned()), (2000, "[Intro]".into()), (20_000, "[Chorus] la la".into()), (25_000, "[x2]".into())]);
+    }
+
+    #[test]
+    fn absurd_stamps_and_offsets_do_not_overflow() {
+        // seconds far beyond i64 milliseconds: the stamp is rejected (the line is then metadata), nothing panics
+        assert!(parse_lrc("[1:99999999999999999999]x").is_empty());
+        assert!(parse_lrc("[153722867280912:99999999999999999999]x").is_empty());
+        assert_eq!(parse_lrc("[offset:-9223372036854775808]\n[00:01.00]a"), [(i64::MAX, "a".to_owned())]);
+        assert_eq!(parse_lrc("[offset:9223372036854775807]\n[00:01.00]a"), [(0, "a".to_owned())]);
     }
 
     #[test]

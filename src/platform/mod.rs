@@ -73,6 +73,37 @@ pub fn dpapi_unprotect(data: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
+/// Where QSettings keeps the app's values on Windows: `HKCU\Software\<organization>\<application>`, both of which
+/// were `ytm` and are `yqt`. Categories ("player", "search") are subkeys.
+#[cfg_attr(not(windows), allow(dead_code))]
+const OLD_SETTINGS_KEY: &str = r"Software\ytm\ytm";
+#[cfg_attr(not(windows), allow(dead_code))]
+const NEW_SETTINGS_KEY: &str = r"Software\yqt\yqt";
+
+/// The old settings are carried over only when there are some and the new place is still empty: an existing new
+/// key is the user's current state and is never written to.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn should_copy_settings(old_exists: bool, new_exists: bool) -> bool {
+    old_exists && !new_exists
+}
+
+/// Windows: copy the Qt settings (volume, shuffle, repeat, recent searches) from the registry key of the app's old
+/// name to the new one, once. `Ok(true)` when they were copied, `Ok(false)` when there was nothing to do (always,
+/// on other systems: there they are files, handled by `migrate`).
+pub fn migrate_registry_settings() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        if !should_copy_settings(windows::key_exists(OLD_SETTINGS_KEY), windows::key_exists(NEW_SETTINGS_KEY)) {
+            return Ok(false);
+        }
+        windows::copy_key(OLD_SETTINGS_KEY, NEW_SETTINGS_KEY)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
 /// The OS's raw "default web browser" token (desktop file, bundle id or ProgId); `None` if unknown.
 pub trait DefaultBrowser {
     fn token(&self) -> Option<String>;
@@ -179,6 +210,18 @@ mod tests {
         fn password(&self, _s: &str, _a: &str) -> Result<Option<String>, PlatformError> {
             self.0.clone().map(|o| o.map(str::to_owned))
         }
+    }
+
+    #[test]
+    fn registry_settings_are_copied_only_into_an_empty_place() {
+        assert!(should_copy_settings(true, false));
+        assert!(!should_copy_settings(true, true), "an existing new key must never be overwritten");
+        assert!(!should_copy_settings(false, false), "nothing to copy");
+        assert!(!should_copy_settings(false, true));
+        // QSettings: HKCU\Software\<organization>\<application>
+        assert_eq!((OLD_SETTINGS_KEY, NEW_SETTINGS_KEY), (r"Software\ytm\ytm", r"Software\yqt\yqt"));
+        #[cfg(not(windows))]
+        assert_eq!(migrate_registry_settings(), Ok(false));
     }
 
     #[test]

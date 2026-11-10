@@ -283,7 +283,7 @@ impl qobject::Settings {
         let cfg = config::current();
         let changed = meta::META.iter().filter(|m| logic::lookup(&cfg, m.path) != logic::default_of(m.path)).count();
         let text = format!(
-            "ytm {}\nOS: {} {}\nPlasma desktop: {}\nSecret stores available: {}\nAudio engine: {}\nMPRIS: {}\nQt Quick Controls style: {}\nSigned in: {}\nLog redaction: {}\nSettings changed from default: {}\nConfig: {}",
+            "yqt {}\nOS: {} {}\nPlasma desktop: {}\nSecret stores available: {}\nAudio engine: {}\nMPRIS: {}\nQt Quick Controls style: {}\nSigned in: {}\nLog redaction: {}\nSettings changed from default: {}\nConfig: {}",
             env!("CARGO_PKG_VERSION"),
             std::env::consts::OS,
             std::env::consts::ARCH,

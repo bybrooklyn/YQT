@@ -23,11 +23,13 @@ pub struct QueueState<T> {
     current: Option<usize>,
     /// Indices visited through shuffle, so "previous" can retrace them.
     history: Vec<usize>,
+    /// Counts replacements of the whole queue (see [`epoch`](Self::epoch)).
+    epoch: u64,
 }
 
 impl<T> Default for QueueState<T> {
     fn default() -> Self {
-        Self { items: Vec::new(), current: None, history: Vec::new() }
+        Self { items: Vec::new(), current: None, history: Vec::new(), epoch: 0 }
     }
 }
 
@@ -47,12 +49,18 @@ impl<T: Clone> QueueState<T> {
     pub fn get(&self, i: usize) -> Option<&T> {
         self.items.get(i)
     }
+    /// Which queue this is: changes whenever the whole queue is replaced or cleared, never when it is only edited.
+    /// The queue feed appends the rest of a long list only to the queue it was started for.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
     pub fn set_current(&mut self, current: Option<usize>) {
         self.current = current.filter(|&i| i < self.items.len());
     }
 
     /// Replace the whole queue (nothing is playing afterwards until the caller sets a current row).
     pub fn replace(&mut self, items: Vec<T>) -> Change<T> {
+        self.epoch += 1;
         self.items = items;
         self.current = None;
         self.history.clear();
@@ -75,6 +83,21 @@ impl<T: Clone> QueueState<T> {
         let at = self.items.len();
         self.items.extend(rows.iter().cloned());
         Change::Insert { at, rows }
+    }
+
+    /// Put `list` (an album) around the playing row: the queue becomes the list, with the playing row standing
+    /// where `same` first finds it, so what came before it in the list is behind it and the rest is ahead. The
+    /// playing row itself is kept as it is (it is the one being played, whatever the list calls it). `None`, and
+    /// nothing changed, when nothing is playing or the list does not hold the playing row.
+    pub fn surround_current(&mut self, mut list: Vec<T>, same: impl Fn(&T, &T) -> bool) -> Option<Change<T>> {
+        let playing = self.items.get(self.current?)?.clone();
+        let at = list.iter().position(|i| same(i, &playing))?;
+        list[at] = playing;
+        self.epoch += 1;
+        self.items = list;
+        self.current = Some(at);
+        self.history.clear();
+        Some(Change::Reset(self.items.clone()))
     }
 
     /// Insert right after the playing row (at the start when nothing is playing).
@@ -230,6 +253,35 @@ mod tests {
     }
 
     #[test]
+    fn an_album_goes_around_the_playing_song() {
+        // 'C' plays alone; its album is a b c d, where the album calls the song 'c'
+        let same = |a: &char, b: &char| a.eq_ignore_ascii_case(b);
+        for (album, at) in [("abcd", 2), ("cabd", 0), ("abdc", 3), ("acbc", 1)] {
+            let mut s = QueueState::default();
+            s.replace(vec!['C']);
+            s.set_current(Some(0));
+            let before = s.epoch();
+            let change = s.surround_current(album.chars().collect(), same).unwrap();
+            assert_eq!(s.current(), Some(at), "{album}");
+            assert_eq!(s.items()[at], 'C', "the row being played is kept, not swapped for the album's copy");
+            assert_eq!(s.len(), 4);
+            assert_eq!(change, Change::Reset(s.items().to_vec()));
+            assert!(s.epoch() > before, "a list still being appended to the old queue must stop");
+        }
+    }
+
+    #[test]
+    fn an_album_without_the_playing_song_changes_nothing() {
+        let mut s = q(3);
+        s.set_current(Some(1));
+        let before = s.clone();
+        assert_eq!(s.surround_current(vec!['x', 'y'], |a, b| a == b), None);
+        assert_eq!(s, before);
+        let mut idle = q(3);
+        assert_eq!(idle.surround_current(vec!['a'], |a, b| a == b), None, "nothing is playing");
+    }
+
+    #[test]
     fn the_playing_track_survives_every_move() {
         for len in 2..6 {
             for cur in 0..len {
@@ -244,6 +296,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_epoch_changes_when_the_queue_is_replaced_or_cleared_not_when_it_is_edited() {
+        let mut s = q(3);
+        let e = s.epoch();
+        s.push('x');
+        s.extend(vec!['y', 'z']);
+        s.move_item(0, 2);
+        s.remove(1);
+        s.set_current(Some(0));
+        assert_eq!(s.epoch(), e, "edits leave it the same queue");
+        s.replace(vec!['n']);
+        assert_ne!(s.epoch(), e);
+        let e = s.epoch();
+        s.clear();
+        assert_ne!(s.epoch(), e);
     }
 
     #[test]

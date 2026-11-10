@@ -53,12 +53,15 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Atomically write `bytes` to `path` as a private file: temp file in the same directory created 0600
-/// (unix), fsynced, then renamed over the target.
+/// (unix), fsynced, then renamed over the target. Every call has its own temp file, so two writers of the same
+/// path (two threads caching the same cover) cannot delete or rename each other's: the last rename simply wins.
 pub fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".into());
-    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(".{name}.{}.{serial}.tmp", std::process::id()));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -301,6 +304,28 @@ mod tests {
         assert_eq!(mode(&f), 0o600);
         let names: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["session.json"]);
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_file_all_succeed_and_leave_a_whole_file() {
+        let root = tmpdir("wp-race");
+        let f = root.join("cover");
+        for round in 0..40u8 {
+            let writers: Vec<_> = (0..4u8)
+                .map(|w| {
+                    let f = f.clone();
+                    std::thread::spawn(move || write_private(&f, &vec![round.wrapping_add(w); 64 * 1024]))
+                })
+                .collect();
+            for w in writers {
+                w.join().unwrap().expect("no writer may fail because of another one");
+            }
+            let got = std::fs::read(&f).unwrap();
+            assert_eq!(got.len(), 64 * 1024);
+            assert!(got.iter().all(|b| *b == got[0]), "the file is one writer's bytes, never a mix");
+        }
+        let names: Vec<_> = std::fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["cover"], "no temp file lingers");
     }
 
     #[cfg(unix)]

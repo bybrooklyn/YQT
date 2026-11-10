@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import org.kde.kirigami as Kirigami
 
 // System-tray icon + menu. The tray itself and everything about its menu (which entries, labels, enabled/checked,

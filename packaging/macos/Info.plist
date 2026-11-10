@@ -4,7 +4,7 @@
 <dict>
     <key>CFBundleName</key><string>YQT</string>
     <key>CFBundleDisplayName</key><string>YT Music</string>
-    <key>CFBundleIdentifier</key><string>org.kde.yqt</string>
+    <key>CFBundleIdentifier</key><string>dev.bybrooklyn.yqt</string>
     <key>CFBundleExecutable</key><string>yqt</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleVersion</key><string>0.1.0</string>

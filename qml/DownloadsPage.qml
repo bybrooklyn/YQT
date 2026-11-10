@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -22,8 +22,25 @@ Kirigami.ScrollablePage {
         return n + " B"
     }
     function fmtSpeed(bps) { return bps > 0 ? fmtBytes(bps) + "/s" : "" }
+    // What the list shows: `rows` mirrored into a list model that is patched in place, so a reload (every state change
+    // of a download) keeps the scroll position instead of rebuilding the list from the top.
+    ListModel { id: rowModel }
+    function shown(r) {
+        return {videoId: String(r.videoId || ""), title: String(r.title || ""), artist: String(r.artist || ""),
+                cover: String(r.cover || ""), state: String(r.state || ""), error: String(r.error || ""),
+                percent: Number(r.percent || 0), speed: Number(r.speed || 0), size: Number(r.size || 0), pinned: !!r.pinned}
+    }
     function reload() {
         try { rows = JSON.parse(Downloads.list()) } catch (e) { rows = [] }
+        for (let i = 0; i < rows.length; ++i) {
+            const r = shown(rows[i])
+            let at = -1
+            for (let j = i; j < rowModel.count && at < 0; ++j) if (rowModel.get(j).videoId === r.videoId) at = j
+            if (at < 0) { rowModel.insert(i, r); continue }
+            if (at !== i) rowModel.move(at, i, 1)
+            rowModel.set(i, r)
+        }
+        if (rowModel.count > rows.length) rowModel.remove(rows.length, rowModel.count - rows.length)
     }
     function pauseText() {
         switch (Downloads.pauseReason) {
@@ -54,7 +71,7 @@ Kirigami.ScrollablePage {
 
     ListView {
         id: list
-        model: page.rows
+        model: rowModel
         clip: true
         spacing: 0
 
@@ -100,7 +117,8 @@ Kirigami.ScrollablePage {
 
         delegate: QQC2.ItemDelegate {
             id: row
-            required property var modelData
+            required property var model
+            readonly property var modelData: model   // the row's fields, live (see `shown`)
             required property int index
             readonly property bool done: modelData.state === "downloaded"
             width: ListView.view.width

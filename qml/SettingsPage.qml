@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -98,8 +98,26 @@ Kirigami.ScrollablePage {
             currentIndex: count >= 0 ? indexOfValue(field.value) : -1
             onActivated: field.commit(currentValue)
         }
+        // A keyboard shortcut is captured by pressing it (KDE's key field). Without that module the text field
+        // below takes the shortcut typed out, as before.
+        Loader {
+            id: keyField
+            active: field.kind === "shortcut"
+            visible: status === Loader.Ready
+            source: active ? Qt.resolvedUrl("ShortcutField.qml") : ""
+            onLoaded: {
+                item.value = Qt.binding(() => field.value === undefined || field.value === null ? "" : String(field.value))
+                item.enabled = Qt.binding(() => field.gateOn)
+            }
+            Connections {
+                target: keyField.item
+                ignoreUnknownSignals: true
+                function onCommitted(value) { field.commit(value) }
+            }
+        }
         QQC2.TextField {
-            visible: field.kind === "text" || field.kind === "url" || field.kind === "dir" || field.kind === "shortcut"
+            visible: field.kind === "text" || field.kind === "url" || field.kind === "dir"
+                     || (field.kind === "shortcut" && keyField.status !== Loader.Ready)
             enabled: field.gateOn
             Layout.preferredWidth: Kirigami.Units.gridUnit * 20
             placeholderText: field.kind === "dir" ? qsTr("Default location") : ""
@@ -422,6 +440,7 @@ Kirigami.ScrollablePage {
                 wrapMode: Text.Wrap
                 text: qsTr("Free software under the GNU GPL v3. Lyrics from LRCLIB, NetEase and YouTube Music.")
             }
+            QQC2.Button { text: qsTr("About YQT"); icon.name: "help-about"; onClicked: applicationWindow().showAbout() }
         }
     }
 }

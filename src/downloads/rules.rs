@@ -186,7 +186,14 @@ pub fn plan(state: &PlanState, rules: &Rules, now: i64) -> Vec<Action> {
     let avg = if state.stored.is_empty() { DEFAULT_SONG_BYTES } else { (used / state.stored.len() as u64).max(1_000_000) };
     let mut free = state.free_bytes;
     for (id, why) in wanted {
-        if have.contains(id.as_str()) || state.in_flight.contains(&id) {
+        if have.contains(id.as_str()) {
+            continue;
+        }
+        if state.in_flight.contains(&id) {
+            // already queued or downloading: it will take its share of the cap and of the disk, so it counts against
+            // the budget now (otherwise every pass would queue another cap's worth on top)
+            used = used.saturating_add(avg);
+            free = free.map(|f| f.saturating_sub(avg));
             continue;
         }
         if used.saturating_add(avg) > rules.cap_bytes || !fits_free_space(free, avg, rules.free_reserve_bytes) {
@@ -388,6 +395,24 @@ mod tests {
         let st = PlanState { queue_ahead: ids(&["q1", "q2"]), ..Default::default() };
         r.cap_bytes = DEFAULT_SONG_BYTES + 1; // room for exactly one default-size song
         assert_eq!(downloads(&plan(&st, &r, NOW)), ["q1"]);
+    }
+
+    #[test]
+    fn queued_downloads_count_against_the_budget_on_later_passes() {
+        let liked: Vec<String> = (0..100).map(|i| format!("l{i:03}")).collect();
+        let mut st = PlanState { liked, free_bytes: Some(1_000_000_000), ..Default::default() };
+        let mut r = rules();
+        r.cap_bytes = 10 * DEFAULT_SONG_BYTES; // room for ten songs
+        let first = plan(&st, &r, NOW);
+        assert_eq!(downloads(&first).len(), 10);
+        st.in_flight = downloads(&first).into_iter().map(str::to_owned).collect();
+        // nothing finished yet: a second and third pass must not queue another ten each
+        assert!(downloads(&plan(&st, &r, NOW)).is_empty());
+        assert!(downloads(&plan(&st, &r, NOW)).is_empty());
+        // the free-space reserve sees them too
+        r.cap_bytes = u64::MAX;
+        st.free_bytes = Some(10 * DEFAULT_SONG_BYTES);
+        assert!(downloads(&plan(&st, &r, NOW)).is_empty(), "the disk is already spoken for by the queued songs");
     }
 
     #[test]

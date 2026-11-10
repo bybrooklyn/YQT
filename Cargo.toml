@@ -16,6 +16,8 @@ libc = "0.2"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std", "registry"] }
 tracing-appender = "0.2"
 regex = "1"
+# same version RustyPipe already pulls in: runs YouTube's player script for signed-in streams (src/challenge.rs)
+rquickjs = "0.9"
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "json", "gzip", "brotli"] }
 plist = "1"

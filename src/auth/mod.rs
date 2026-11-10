@@ -64,11 +64,28 @@ pub fn sanitize_header_value(v: &str) -> Result<String, String> {
     Ok(v.trim().to_owned())
 }
 
+/// The cookies that carry the value signed-in requests are authorised with (`SAPISIDHASH`), in order of preference.
+const LOGIN_COOKIES: [&str; 3] = ["SAPISID", "__Secure-3PAPISID", "__Secure-1PAPISID"];
+
+/// The SAPISID value of a Cookie header. The one rule for "is this a signed-in session": the import checks and the
+/// signed-in calls in `ytapi` both use it, so a session accepted here is never refused there.
+pub fn sapisid(header: &str) -> Option<&str> {
+    let pairs = || header.split(';').filter_map(|p| p.trim().split_once('='));
+    LOGIN_COOKIES.iter().find_map(|name| pairs().find(|(k, v)| k == name && !v.is_empty()).map(|(_, v)| v))
+}
+
 pub fn has_login_cookie(header: &str) -> bool {
-    header
-        .split(';')
-        .filter_map(|p| p.trim().split_once('='))
-        .any(|(k, _)| matches!(k, "SAPISID" | "__Secure-3PAPISID" | "__Secure-1PAPISID"))
+    sapisid(header).is_some()
+}
+
+/// Does `table` have a column called `column`? (Browser schemas change; the fixtures are minimal.)
+fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    conn.query_row("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2", [table, column], |_| Ok(())).is_ok()
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it: then nothing counts as expired).
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Join `name=value` parts into a header, or explain that the browser isn't signed in.
@@ -181,6 +198,33 @@ impl Drop for PrivateDir {
     }
 }
 
+/// Where the browser of the last successful import is remembered (its `Browser::id`, nothing secret).
+fn renewal_file() -> std::path::PathBuf {
+    crate::state::data_dir().join("login_browser")
+}
+
+/// A browser id as `detect` makes them: short, plain characters. Anything else in the file is ignored.
+fn plausible_browser_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+/// Remember which browser the sign-in came from, so that an expired session can be renewed from it without asking
+/// (browsers keep rotating these cookies, so a copy stops working after a while). `None` forgets it: pasted
+/// cookies and a sign-out have nothing to renew from.
+pub fn remember_browser(id: Option<&str>) {
+    let _ = match id.filter(|id| plausible_browser_id(id)) {
+        Some(id) => crate::state::write_private(&renewal_file(), id.as_bytes()),
+        None => std::fs::remove_file(renewal_file()),
+    };
+}
+
+/// The browser to renew the sign-in from, if the last sign-in was an import.
+pub fn remembered_browser() -> Option<String> {
+    let id = std::fs::read_to_string(renewal_file()).ok()?;
+    let id = id.trim();
+    plausible_browser_id(id).then(|| id.to_owned())
+}
+
 /// Import from one browser (by `Browser::id`) – tries each of its profiles, newest first.
 pub fn import_from_browser(id: &str) -> Result<(String, String), String> {
     let b = detect().into_iter().find(|b| b.id == id).ok_or_else(|| "That browser wasn't found".to_owned())?;
@@ -201,6 +245,16 @@ pub fn import_from_browser(id: &str) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_browser_ids_are_remembered() {
+        for ok in ["firefox", "chromium-flatpak", "brave_beta", "zen:default"] {
+            assert!(plausible_browser_id(ok), "{ok}");
+        }
+        for bad in ["", "../../etc/passwd", "a b", "fire\nfox", &"x".repeat(65)] {
+            assert!(!plausible_browser_id(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn parses_header_forms() {
@@ -267,6 +321,12 @@ mod tests {
         assert!(has_login_cookie("a=1; SAPISID=xyz"));
         assert!(has_login_cookie("__Secure-3PAPISID=x"));
         assert!(!has_login_cookie("VISITOR_INFO1_LIVE=x; PREF=y"));
+        // one lookup for import and for the signed-in calls: whatever counts as signed in also yields the value
+        assert_eq!(sapisid("a=1; __Secure-1PAPISID=one"), Some("one"));
+        assert_eq!(sapisid("__Secure-1PAPISID=one; __Secure-3PAPISID=three"), Some("three"));
+        assert_eq!(sapisid("__Secure-3PAPISID=three; b=2; SAPISID=plain"), Some("plain"));
+        assert_eq!(sapisid("SAPISID=; __Secure-3PAPISID=three"), Some("three"));
+        assert!(!has_login_cookie("SAPISID=") && sapisid("XSAPISID=x").is_none());
     }
 
     #[test]

@@ -77,20 +77,22 @@ qmllint:
 # Start the app headless (no window on your screen) for a few seconds and show Qt warnings
 [unix]
 smoke SECONDS="8":
-    QT_ASSUME_STDERR_HAS_CONSOLE=1 QT_QPA_PLATFORM=offscreen timeout {{SECONDS}} ./target/debug/yqt 2>&1 \
+    YQT_MULTI_INSTANCE=1 QT_ASSUME_STDERR_HAS_CONSOLE=1 QT_QPA_PLATFORM=offscreen timeout {{SECONDS}} ./target/debug/yqt 2>&1 \
         | grep -v 'ffmpeg' || true
 
 # Install the binary and desktop entry for the current user
 [linux]
 install: release
     install -Dm755 target/release/yqt ~/.local/bin/yqt
-    install -Dm644 org.kde.yqt.desktop ~/.local/share/applications/org.kde.yqt.desktop
+    install -Dm644 dev.bybrooklyn.yqt.desktop ~/.local/share/applications/dev.bybrooklyn.yqt.desktop
+    rm -f ~/.local/share/applications/org.kde.yqt.desktop   # the entry's old name: two would show two launchers
+    install -Dm644 dev.bybrooklyn.yqt.metainfo.xml ~/.local/share/metainfo/dev.bybrooklyn.yqt.metainfo.xml
     install -Dm644 assets/logo.svg ~/.local/share/icons/hicolor/scalable/apps/yqt.svg
     -gtk-update-icon-cache -q ~/.local/share/icons/hicolor 2>/dev/null
 
 [linux]
 uninstall:
-    rm -f ~/.local/bin/yqt ~/.local/share/applications/org.kde.yqt.desktop ~/.local/share/icons/hicolor/scalable/apps/yqt.svg
+    rm -f ~/.local/bin/yqt ~/.local/share/applications/dev.bybrooklyn.yqt.desktop ~/.local/share/applications/org.kde.yqt.desktop ~/.local/share/icons/hicolor/scalable/apps/yqt.svg ~/.local/share/metainfo/dev.bybrooklyn.yqt.metainfo.xml
 
 # One-time: download Windows Qt + matching Linux host tools into .cross/ (needs pipx; cross-builds use cargo-xwin + clang-cl)
 [linux]

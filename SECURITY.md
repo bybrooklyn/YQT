@@ -50,7 +50,7 @@ profile anyway), a compromised OS, physical access.
 | S-19 | Low | Stream URLs from a YouTube response were fetched without checking the host | Fixed: only https Google/YouTube media hosts (`vision::is_media_url`); tested, and checked live against public videos |
 | S-20 | Low | Cover downloads followed redirects to any host (the https check ran after the request) | Fixed: a dedicated client whose redirect policy applies the same rule to every hop |
 | S-21 | Low | API and watch-page bodies were read without a size cap | Fixed: `state::read_limited` (8 MiB) |
-| S-22 | Low | A failed read of `config.toml` followed by a Settings change could save the template over the user's settings | Fixed: only a missing file falls back to the template; any other read error aborts the change |
+| S-22 | Low | A failed read of `config.toml` followed by a Settings change could save the template over the user's settings | Fixed: only a missing file falls back to the template, at start-up as well as in Settings; any other read error leaves the file alone |
 
 | S-23 | Low | `serve_file` checked a path and then opened it: in a shared, writable downloads folder it could be swapped for a symlink | Fixed: after opening, the file must still be the same regular file the path names (never a symlink); tested |
 | S-24 | Low | MPRIS `SetPosition` ignored the track id | Fixed: only a request naming the track that is playing is honoured, as the spec requires; tested |
@@ -84,4 +84,6 @@ Nothing from the audit is open. What remains is outside the code: the Windows (D
 * The proxy token is in URLs handed to Qt Multimedia and could appear in Qt's own debug output; it is per-run
   and useless after exit.
 * Windows: permissions rely on the default per-user profile ACLs; no explicit ACL hardening is applied.
-* The proxy does not limit the number of concurrent local connections.
+* The proxy serves at most 64 connections at once (S-27), but the limit is shared: a local process needs no token to
+  open connections, and each one may sit idle for the 10 s head timeout, so by reconnecting it can keep the slots
+  busy and stall playback for as long as it runs. It gains no access to any stream, file or cover that way.

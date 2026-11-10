@@ -149,27 +149,46 @@ fn serve(l: std::net::TcpListener, ctx: Arc<Ctx>, client: reqwest::Client, rt: &
     });
 }
 
+/// Record `id` as the newest registration and forget the oldest ones beyond `max`. Registering an id again makes it
+/// the newest again: it is the one about to be played, so it must not be dropped as "the oldest".
+fn register(
+    urls: &mut HashMap<String, (String, String)>,
+    order: &mut std::collections::VecDeque<String>,
+    id: &str,
+    real: &str,
+    ua: &str,
+    max: usize,
+) {
+    if urls.insert(id.to_owned(), (real.to_owned(), ua.to_owned())).is_some() {
+        order.retain(|x| x != id);
+    }
+    order.push_back(id.to_owned());
+    // Keep the registry bounded over a long session.
+    while order.len() > max {
+        if let Some(old) = order.pop_front() {
+            urls.remove(&old);
+        }
+    }
+}
+
 /// Register a real stream URL and get the local URL to hand to the media player.
 pub fn local_url(id: &str, real: &str, ua: &str) -> String {
     {
         let mut urls = URLS.lock().unwrap();
-        let urls = urls.get_or_insert_default();
         let mut order = URL_ORDER.lock().unwrap();
-        if urls.insert(id.to_owned(), (real.to_owned(), ua.to_owned())).is_none() {
-            order.push_back(id.to_owned());
-        }
-        // Keep the registry bounded over a long session: forget the oldest registrations.
-        while order.len() > MAX_REGISTERED_URLS {
-            if let Some(old) = order.pop_front() {
-                urls.remove(&old);
-            }
-        }
+        register(urls.get_or_insert_default(), &mut order, id, real, ua, MAX_REGISTERED_URLS);
     }
     let c = ctx();
     match &c.token {
         Some(t) => format!("http://127.0.0.1:{}/t/{}/{}", c.port, t, id),
         None => format!("http://127.0.0.1:{}/{}", c.port, id),
     }
+}
+
+/// Is the stream for `id` still registered (the registry is bounded, so an old one may have been evicted)? A local
+/// URL handed out earlier only works while this is true.
+pub fn is_registered(id: &str) -> bool {
+    URLS.lock().unwrap().as_ref().is_some_and(|urls| urls.contains_key(id))
 }
 
 fn base_url(path: &str) -> String {
@@ -289,14 +308,46 @@ async fn serve_cover(
     serve_file(sock, &path, mime, method, range, true).await
 }
 
-/// `bytes=a-b` / `bytes=a-` / none → (start, optional inclusive end).
-fn parse_range(range: Option<&str>) -> (u64, Option<u64>) {
+/// What a `Range` header asks of a stream whose length is not known yet.
+#[derive(Debug, PartialEq, Eq)]
+enum Wanted {
+    /// From `start` to the optional inclusive end (`bytes=a-b` / `bytes=a-` / no header).
+    From(u64, Option<u64>),
+    /// The last `n` bytes (`bytes=-n`).
+    Suffix(u64),
+}
+
+fn parse_range(range: Option<&str>) -> Wanted {
     match range.and_then(|r| r.strip_prefix("bytes=")) {
         Some(r) => {
             let (a, b) = r.split_once('-').unwrap_or(("0", ""));
-            (a.trim().parse().unwrap_or(0), b.trim().parse().ok())
+            let (a, b) = (a.trim(), b.trim());
+            match (a.is_empty(), b.parse::<u64>()) {
+                (true, Ok(n)) => Wanted::Suffix(n),
+                (_, b) => Wanted::From(a.parse().unwrap_or(0), b.ok()),
+            }
         }
-        None => (0, None),
+        None => Wanted::From(0, None),
+    }
+}
+
+/// The length after the `/` of a `Content-Range` header (0 when there is none).
+fn content_range_total(resp: &reqwest::Response) -> u64 {
+    resp.headers()
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit('/').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The upstream content type, unless it tries to smuggle header lines through it.
+fn safe_content_type(resp: &reqwest::Response) -> String {
+    let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
+    if ctype.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        "application/octet-stream".to_owned()
+    } else {
+        ctype.to_owned()
     }
 }
 
@@ -384,31 +435,50 @@ async fn handle(mut sock: TcpStream, client: reqwest::Client, ctx: &Ctx) -> std:
     // googlevideo refuses open-ended / unbounded Range requests, so everything is
     // fetched in bounded chunks (like yt-dlp's http_chunk_size) and stitched together.
     let ch = ctx.chunk;
-    let (start, req_end) = parse_range(range.as_deref());
     let fetch = |a: u64, b: u64| client.get(&real).header("User-Agent", &ua).header("Range", format!("bytes={a}-{b}")).send();
+    let (start, req_end) = match parse_range(range.as_deref()) {
+        Wanted::From(a, b) => (a, b),
+        // "the last n bytes" needs the length first: one byte from upstream tells it
+        Wanted::Suffix(n) => match fetch(0, 0).await {
+            Ok(r) if r.status().as_u16() == 206 && n > 0 && content_range_total(&r) > 0 => {
+                (content_range_total(&r).saturating_sub(n), None)
+            }
+            Ok(r) if r.status().as_u16() == 200 => (0, None), // upstream ignores ranges: handled below
+            Ok(_) => return reply(&mut sock, "416 Range Not Satisfiable").await,
+            Err(_) => return reply(&mut sock, "502 Bad Gateway").await,
+        },
+    };
     let mut resp = match fetch(start, req_end.map_or(start.saturating_add(ch - 1), |e| e.min(start.saturating_add(ch - 1)))).await {
         Ok(r) => r,
         Err(_) => return reply(&mut sock, "502 Bad Gateway").await, // never include the error: it carries the URL
     };
     let status = resp.status();
+    if status.as_u16() == 200 {
+        // The upstream ignored the range and sends everything. A server may do that, so pass it on as what it is:
+        // a complete 200 (not an empty one, and not a 206 with made-up offsets).
+        let ctype = safe_content_type(&resp);
+        let len = resp.content_length();
+        let len_line = len.map(|l| format!("Content-Length: {l}\r\n")).unwrap_or_default();
+        sock.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\n{len_line}Connection: close\r\n\r\n").as_bytes()).await?;
+        let mut left = if method == "HEAD" { 0 } else { len.unwrap_or(u64::MAX) };
+        while left > 0 {
+            let Ok(Some(bytes)) = resp.chunk().await else { break };
+            let take = (bytes.len() as u64).min(left) as usize; // never more than the declared length
+            sock.write_all(&bytes[..take]).await?;
+            left -= take as u64;
+        }
+        return Ok(());
+    }
     if status.as_u16() != 206 {
         let out = format!("{} {}", status.as_u16(), status.canonical_reason().unwrap_or(""));
         return reply(&mut sock, &out).await;
     }
-    let total: u64 = resp
-        .headers()
-        .get("content-range")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.rsplit('/').next())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+    let total = content_range_total(&resp);
     let end = req_end.unwrap_or(total.saturating_sub(1)).min(total.saturating_sub(1));
     if end < start {
         return reply(&mut sock, "416 Range Not Satisfiable").await;
     }
-    let ctype = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream").to_owned();
-    // Don't let a hostile upstream smuggle header lines through the content type.
-    let ctype = if ctype.bytes().any(|b| b < 0x20 || b == 0x7f) { "application/octet-stream".to_owned() } else { ctype };
+    let ctype = safe_content_type(&resp);
     let out = if range.is_some() {
         format!("HTTP/1.1 206 Partial Content\r\nContent-Type: {ctype}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {start}-{end}/{total}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", end + 1 - start)
     } else {
@@ -475,30 +545,118 @@ mod tests {
 
     #[test]
     fn the_url_registry_stays_bounded() {
-        // (uses real ids, but registers only localhost-looking dummies; the proxy context is created on first use)
+        let (mut urls, mut order) = (HashMap::new(), std::collections::VecDeque::new());
         for i in 0..(MAX_REGISTERED_URLS + 50) {
-            let id = format!("bound{i:05}");
-            URLS.lock().unwrap().get_or_insert_default().insert(id.clone(), ("http://127.0.0.1:1/x".into(), "ua".into()));
-            let mut order = URL_ORDER.lock().unwrap();
-            order.push_back(id);
-            while order.len() > MAX_REGISTERED_URLS {
-                if let Some(old) = order.pop_front() {
-                    URLS.lock().unwrap().get_or_insert_default().remove(&old);
-                }
-            }
+            register(&mut urls, &mut order, &format!("bound{i:05}"), "http://127.0.0.1:1/x", "ua", MAX_REGISTERED_URLS);
         }
-        assert!(URL_ORDER.lock().unwrap().len() <= MAX_REGISTERED_URLS);
-        assert!(!URLS.lock().unwrap().get_or_insert_default().contains_key("bound00000"), "the oldest registration was dropped");
-        assert!(URLS.lock().unwrap().get_or_insert_default().contains_key(&format!("bound{:05}", MAX_REGISTERED_URLS + 49)));
+        assert_eq!((order.len(), urls.len()), (MAX_REGISTERED_URLS, MAX_REGISTERED_URLS));
+        assert!(!urls.contains_key("bound00000"), "the oldest registration was dropped");
+        assert!(urls.contains_key(&format!("bound{:05}", MAX_REGISTERED_URLS + 49)));
+    }
+
+    #[test]
+    fn registering_a_track_again_makes_it_the_newest() {
+        let (mut urls, mut order) = (HashMap::new(), std::collections::VecDeque::new());
+        for id in ["a", "b", "c"] {
+            register(&mut urls, &mut order, id, "old", "ua", 3);
+        }
+        // "a" is resolved again (its cached URL expired) and is about to be played …
+        register(&mut urls, &mut order, "a", "fresh", "ua", 3);
+        assert_eq!(order.len(), 3, "no duplicate entry");
+        // … so the next track's registration must drop "b", not the one that is playing
+        register(&mut urls, &mut order, "d", "x", "ua", 3);
+        assert_eq!(urls.get("a").map(|v| v.0.as_str()), Some("fresh"));
+        assert!(!urls.contains_key("b") && urls.contains_key("c") && urls.contains_key("d"));
+        assert_eq!(order, ["c", "a", "d"]);
     }
 
     #[test]
     fn range_forms() {
-        assert_eq!(parse_range(None), (0, None));
-        assert_eq!(parse_range(Some("bytes=100-")), (100, None));
-        assert_eq!(parse_range(Some("bytes=100-199")), (100, Some(199)));
-        assert_eq!(parse_range(Some("bytes=-500")), (0, Some(500)));
-        assert_eq!(parse_range(Some("garbage")), (0, None));
+        assert_eq!(parse_range(None), Wanted::From(0, None));
+        assert_eq!(parse_range(Some("bytes=100-")), Wanted::From(100, None));
+        assert_eq!(parse_range(Some("bytes=100-199")), Wanted::From(100, Some(199)));
+        assert_eq!(parse_range(Some("bytes=-500")), Wanted::Suffix(500), "the last 500 bytes, not the first 501");
+        assert_eq!(parse_range(Some("bytes=-")), Wanted::From(0, None));
+        assert_eq!(parse_range(Some("garbage")), Wanted::From(0, None));
+    }
+
+    /// A fake googlevideo with an 11-byte body. `honour_range = false` makes it answer 200 with everything.
+    async fn ranged_upstream(honour_range: bool) -> u16 {
+        const BODY: &[u8] = b"hello world";
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut b = [0u8; 4096];
+                    let n = s.read(&mut b).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&b[..n]).to_ascii_lowercase();
+                    let range = head.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| r.trim().split_once('-'));
+                    let out = match range.filter(|_| honour_range) {
+                        Some((a, e)) => {
+                            let a: usize = a.parse().unwrap();
+                            let e: usize = e.parse::<usize>().unwrap().min(BODY.len() - 1);
+                            let mut h = format!(
+                                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{e}/{}\r\nContent-Type: audio/webm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                BODY.len(),
+                                e + 1 - a
+                            )
+                            .into_bytes();
+                            h.extend_from_slice(&BODY[a..=e]);
+                            h
+                        }
+                        None => {
+                            let mut h = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: audio/webm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                BODY.len()
+                            )
+                            .into_bytes();
+                            h.extend_from_slice(BODY);
+                            h
+                        }
+                    };
+                    let _ = s.write_all(&out).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_suffix_range_serves_the_end_of_the_stream() {
+        let up = ranged_upstream(true).await;
+        URLS.lock().unwrap().get_or_insert_default().insert("w7suffix".into(), (format!("http://127.0.0.1:{up}/x"), "ua".into()));
+        let port = start(Some("tok")).await;
+        let host = format!("127.0.0.1:{port}");
+        let r = raw(port, &ranged("/t/tok/w7suffix", &host, "bytes=-5")).await;
+        assert!(r.starts_with("HTTP/1.1 206") && r.contains("Content-Range: bytes 6-10/11") && r.contains("Content-Length: 5"), "{r}");
+        assert!(r.ends_with("\r\n\r\nworld"), "{r}");
+        // longer than the stream = all of it; zero bytes = unsatisfiable
+        let r = raw(port, &ranged("/t/tok/w7suffix", &host, "bytes=-500")).await;
+        assert!(r.contains("Content-Range: bytes 0-10/11") && r.ends_with("\r\n\r\nhello world"), "{r}");
+        assert!(raw(port, &ranged("/t/tok/w7suffix", &host, "bytes=-0")).await.starts_with("HTTP/1.1 416"));
+        // the ordinary forms still work
+        let r = raw(port, &ranged("/t/tok/w7suffix", &host, "bytes=6-")).await;
+        assert!(r.contains("Content-Range: bytes 6-10/11") && r.ends_with("\r\n\r\nworld"), "{r}");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_that_ignores_ranges_is_passed_on_whole() {
+        let up = ranged_upstream(false).await;
+        URLS.lock().unwrap().get_or_insert_default().insert("w7norange".into(), (format!("http://127.0.0.1:{up}/x"), "ua".into()));
+        let port = start(Some("tok")).await;
+        let host = format!("127.0.0.1:{port}");
+        for request in [
+            req("GET", "/t/tok/w7norange", &host),
+            ranged("/t/tok/w7norange", &host, "bytes=6-"),
+            ranged("/t/tok/w7norange", &host, "bytes=-5"),
+        ] {
+            let r = raw(port, &request).await;
+            assert!(r.starts_with("HTTP/1.1 200 OK") && r.contains("Content-Length: 11") && !r.contains("Content-Range"), "{r}");
+            assert!(r.ends_with("\r\n\r\nhello world"), "the body is there, not an empty 200: {r}");
+        }
+        let head = raw(port, &req("HEAD", "/t/tok/w7norange", &host)).await;
+        assert!(head.starts_with("HTTP/1.1 200 OK") && head.ends_with("\r\n\r\n"), "{head}");
     }
 
     #[test]

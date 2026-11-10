@@ -12,6 +12,30 @@ pub struct Session {
     pub position: i64,
 }
 
+/// What a "save the session now" request should do to the file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Plan {
+    /// Leave the file alone: the queue is in the middle of an edit (or a restore), so what is in memory is half old,
+    /// half new, and the file is still the better record.
+    Keep,
+    /// Nothing is queued any more.
+    Clear,
+    Save(Session),
+}
+
+/// Decide what to write. `current` is the queue's own playing row (not a UI copy of it, which lags during an edit);
+/// `hold` is set while a session is being restored or a track reloaded in place.
+pub fn plan(items: &[Value], current: Option<usize>, position: i64, hold: bool) -> Plan {
+    if hold {
+        return Plan::Keep;
+    }
+    match current {
+        _ if items.is_empty() => Plan::Clear,
+        Some(index) if index < items.len() => Plan::Save(Session { items: items.to_vec(), index, position }),
+        _ => Plan::Keep,
+    }
+}
+
 impl Session {
     pub fn default_path() -> PathBuf {
         crate::state::data_dir().join("session.json")
@@ -102,6 +126,23 @@ mod tests {
         std::fs::write(&p, serde_json::to_string(&json!({"items": songs(1)})).unwrap()).unwrap();
         let s = Session::load_from(&p).unwrap();
         assert_eq!((s.index, s.position), (0, 0));
+    }
+
+    #[test]
+    fn a_half_edited_queue_never_reaches_the_file() {
+        let q = songs(3);
+        // normal: save what is playing
+        assert_eq!(plan(&q, Some(1), 7, false), Plan::Save(Session { items: q.clone(), index: 1, position: 7 }));
+        // the queue was just replaced and nothing is current yet (restore, "play this album", removing the playing
+        // row): the old file must neither be deleted nor overwritten with the previous track's index/position
+        assert_eq!(plan(&q, None, 90_000, false), Plan::Keep);
+        assert_eq!(plan(&q, Some(3), 0, false), Plan::Keep);
+        // while a session is being restored nothing is written at all
+        assert_eq!(plan(&q, Some(1), 0, true), Plan::Keep);
+        assert_eq!(plan(&[], None, 0, true), Plan::Keep);
+        // an empty queue is the only thing that removes the file
+        assert_eq!(plan(&[], None, 0, false), Plan::Clear);
+        assert_eq!(plan(&[], Some(0), 0, false), Plan::Clear);
     }
 
     #[test]

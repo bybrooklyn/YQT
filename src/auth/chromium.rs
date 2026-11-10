@@ -13,7 +13,7 @@
 //!
 //! Only the three key lookups touch the OS; everything else is plain functions covered by tests.
 use super::detect::{mtime, Dirs, Os};
-use super::{finish_header, with_private_copy};
+use super::{finish_header, has_column, unix_now, with_private_copy};
 use crate::platform::{all_passwords, SecretStore};
 use std::path::{Path, PathBuf};
 
@@ -235,6 +235,11 @@ pub fn decrypt_cookie(enc: &[u8], keys: &mut dyn KeySource, strip_hash: bool) ->
 
 // ---- reading the cookie table ------------------------------------------------------------------
 
+/// Unix seconds → Chromium's clock (microseconds since 1601-01-01).
+fn chrome_time(unix_secs: i64) -> i64 {
+    unix_secs.saturating_add(11_644_473_600).saturating_mul(1_000_000)
+}
+
 pub fn read(db: &Path, keys: &mut dyn KeySource) -> Result<String, String> {
     with_private_copy(db, |copy| cookies_from_db(copy, keys))
 }
@@ -246,27 +251,51 @@ pub fn cookies_from_db(copy: &Path, keys: &mut dyn KeySource) -> Result<String, 
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let mut stmt = conn
-        .prepare("SELECT name, value, encrypted_value FROM cookies WHERE host_key = '.youtube.com' OR host_key = 'youtube.com' OR host_key = 'music.youtube.com' OR host_key = '.music.youtube.com' ORDER BY host_key DESC")
-        .map_err(|e| e.to_string())?;
-    let rows: Vec<(String, String, Vec<u8>)> =
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| e.to_string())?.flatten().collect();
+    // Cookies set inside another site's frame are kept apart (`top_frame_site_key`, "" = the normal jar) and are
+    // not the session; expired ones are still in the file until the browser gets round to deleting them.
+    // `expires_utc` is in microseconds since 1601; 0 = no expiry recorded (a session cookie).
+    let mut filter = String::new();
+    if has_column(&conn, "cookies", "top_frame_site_key") {
+        filter.push_str(" AND (top_frame_site_key IS NULL OR top_frame_site_key = '')");
+    }
+    if has_column(&conn, "cookies", "expires_utc") {
+        filter.push_str(" AND (expires_utc IS NULL OR expires_utc <= 0 OR expires_utc > ?1)");
+    } else {
+        filter.push_str(" AND ?1 = ?1");
+    }
+    let sql = format!(
+        "SELECT name, value, encrypted_value FROM cookies WHERE (host_key = '.youtube.com' OR host_key = 'youtube.com' OR host_key = 'music.youtube.com' OR host_key = '.music.youtube.com'){filter} ORDER BY host_key DESC"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, Vec<u8>)> = stmt
+        .query_map([chrome_time(unix_now())], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
 
     let mut seen = std::collections::HashSet::new();
     let mut parts = Vec::new();
     let mut unsupported = None;
     for (name, value, enc) in rows {
-        if !seen.insert(name.clone()) {
+        if seen.contains(&name) {
             continue;
         }
-        if !value.is_empty() {
-            parts.push(format!("{name}={value}"));
-            continue;
-        }
-        match decrypt_cookie(&enc, keys, version >= 24) {
-            Decrypted::Text(v) => parts.push(format!("{name}={v}")),
-            Decrypted::Unsupported(why) => unsupported = Some(why),
-            Decrypted::Failed => {}
+        let text = if !value.is_empty() {
+            Some(value)
+        } else {
+            match decrypt_cookie(&enc, keys, version >= 24) {
+                Decrypted::Text(v) => Some(v),
+                Decrypted::Unsupported(why) => {
+                    unsupported = Some(why);
+                    None
+                }
+                Decrypted::Failed => None,
+            }
+        };
+        // A name counts as seen only once it has a value: a row that cannot be read must not hide a later good one.
+        if let Some(v) = text {
+            parts.push(format!("{name}={v}"));
+            seen.insert(name);
         }
     }
     if parts.is_empty() {
@@ -282,13 +311,10 @@ pub fn cookies_from_db(copy: &Path, keys: &mut dyn KeySource) -> Result<String, 
 
 pub fn key_source(def: &Def, root: &Path) -> Box<dyn KeySource> {
     match Os::current() {
-        Os::Linux => Box::new(StoreKeys::new(
-            crate::platform::native_secret_stores(),
-            format!("{} Safe Storage", def.product),
-            def.app.to_owned(),
-            1,
-            true,
-        )),
+        Os::Linux => Box::new(
+            StoreKeys::new(crate::platform::native_secret_stores(), format!("{} Safe Storage", def.product), def.app.to_owned(), 1, true)
+                .with_fallbacks(linux_fallbacks(def)),
+        ),
         Os::Mac => Box::new(StoreKeys::new(
             crate::platform::native_secret_stores(),
             format!("{} Safe Storage", def.product),
@@ -309,13 +335,30 @@ pub struct StoreKeys {
     iterations: u32,
     /// Linux "basic" password store: v10 blobs use the fixed password "peanuts".
     peanuts: bool,
+    /// Other (service, account_or_app) names the key may be stored under, asked after the browser's own.
+    fallbacks: Vec<(String, String)>,
     cached: Option<Vec<Key>>,
 }
 
 impl StoreKeys {
     pub fn new(stores: Vec<Box<dyn SecretStore>>, service: String, account_or_app: String, iterations: u32, peanuts: bool) -> Self {
-        StoreKeys { stores, service, account_or_app, iterations, peanuts, cached: None }
+        StoreKeys { stores, service, account_or_app, iterations, peanuts, fallbacks: Vec::new(), cached: None }
     }
+
+    pub fn with_fallbacks(mut self, fallbacks: Vec<(String, String)>) -> Self {
+        self.fallbacks = fallbacks;
+        self
+    }
+}
+
+/// On Linux several Chromium builds keep their key under the upstream names instead of their own (Edge and Opera
+/// as "Chromium Safe Storage", Vivaldi as "Chrome Safe Storage"), so those are tried after the browser's own name.
+pub fn linux_fallbacks(def: &Def) -> Vec<(String, String)> {
+    [("Chromium", "chromium"), ("Chrome", "chrome")]
+        .iter()
+        .filter(|(product, _)| *product != def.product)
+        .map(|(product, app)| (format!("{product} Safe Storage"), (*app).to_owned()))
+        .collect()
 }
 
 impl KeySource for StoreKeys {
@@ -325,11 +368,21 @@ impl KeySource for StoreKeys {
             return vec![peanuts];
         }
         let (stores, service, acct, iters) = (&self.stores, &self.service, &self.account_or_app, self.iterations);
+        let fallbacks = &self.fallbacks;
         let mut keys = self
             .cached
             .get_or_insert_with(|| {
                 // Errors are deliberately dropped: a missing wallet just means that key source is unavailable.
-                all_passwords(stores, service, acct).unwrap_or_default().iter().map(|p| Key::Cbc(cbc_key(p, iters))).collect()
+                let mut keys: Vec<Key> = Vec::new();
+                for (service, acct) in std::iter::once((service, acct)).chain(fallbacks.iter().map(|(s, a)| (s, a))) {
+                    for p in all_passwords(stores, service, acct).unwrap_or_default() {
+                        let key = Key::Cbc(cbc_key(&p, iters));
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+                keys
             })
             .clone();
         if self.peanuts {
@@ -585,6 +638,97 @@ mod tests {
         assert_eq!(ks.keys(b"v10"), vec![Key::Cbc(cbc_key("kc-pw", 1003))]);
         let mut none = store_keys(vec![Box::new(FakeStore(Ok(None)))], 1003, false);
         assert!(none.keys(b"v10").is_empty());
+    }
+
+    /// Answers only for one (service, application) pair, like a keyring that holds another product's entry.
+    struct NamedStore(&'static str, &'static str, &'static str);
+    impl SecretStore for NamedStore {
+        fn password(&self, service: &str, acct: &str) -> Result<Option<String>, crate::platform::PlatformError> {
+            Ok((service == self.0 && acct == self.1).then(|| self.2.to_owned()))
+        }
+    }
+
+    #[test]
+    fn linux_keys_are_also_looked_up_under_the_upstream_names() {
+        let by = |id: &str| DEFS.iter().find(|d| d.id == id).unwrap();
+        let chromium = ("Chromium Safe Storage".to_owned(), "chromium".to_owned());
+        let chrome = ("Chrome Safe Storage".to_owned(), "chrome".to_owned());
+        for id in ["edge", "opera", "vivaldi", "brave"] {
+            assert_eq!(linux_fallbacks(by(id)), vec![chromium.clone(), chrome.clone()], "{id}");
+        }
+        assert_eq!(linux_fallbacks(by("chrome")), vec![chromium.clone()]);
+        assert_eq!(linux_fallbacks(by("chromium")), vec![chrome.clone()]);
+
+        // Vivaldi's key kept as "Chrome Safe Storage": found through the fallback, and decrypts
+        let key = cbc_key("vivaldi-pw", 1);
+        let blob = enc_cbc(b"v11", &key, &prefixed("cookie-val"));
+        let vivaldi = by("vivaldi");
+        let stores: Vec<Box<dyn SecretStore>> = vec![Box::new(NamedStore("Chrome Safe Storage", "chrome", "vivaldi-pw"))];
+        let mut ks =
+            StoreKeys::new(stores, "Vivaldi Safe Storage".into(), "vivaldi".into(), 1, true).with_fallbacks(linux_fallbacks(vivaldi));
+        assert_eq!(decrypt_cookie(&blob, &mut ks, true), Decrypted::Text("cookie-val".into()));
+        // the browser's own name still comes first, and the same password is not tried twice
+        let own: Vec<Box<dyn SecretStore>> = vec![
+            Box::new(NamedStore("Vivaldi Safe Storage", "vivaldi", "own-pw")),
+            Box::new(NamedStore("Chrome Safe Storage", "chrome", "own-pw")),
+        ];
+        let mut ks =
+            StoreKeys::new(own, "Vivaldi Safe Storage".into(), "vivaldi".into(), 1, false).with_fallbacks(linux_fallbacks(vivaldi));
+        assert_eq!(ks.keys(b"v11"), vec![Key::Cbc(cbc_key("own-pw", 1))]);
+    }
+
+    #[test]
+    fn an_unreadable_row_does_not_hide_a_readable_one_of_the_same_name() {
+        let key = cbc_key("pw", 1);
+        // `youtube.com` sorts before `.youtube.com` in the query's order, so the broken row is met first
+        let (dir, db) = make_db(
+            "dedupe",
+            &[
+                ("youtube.com", "SAPISID", "", enc_cbc(b"v11", &cbc_key("other", 1), &prefixed("unreadable"))),
+                (".youtube.com", "SAPISID", "", enc_cbc(b"v11", &key, &prefixed("good"))),
+                (".youtube.com", "SID", "", enc_cbc(b"v11", &key, &prefixed("sid"))),
+            ],
+        );
+        let h = cookies_from_db(&db, &mut Fixed(vec![Key::Cbc(key)])).unwrap();
+        assert!(h.contains("SAPISID=good") && h.contains("SID=sid"), "{h}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn expired_and_partitioned_cookies_are_left_out() {
+        let dir = std::env::temp_dir().join(format!("ytm-test-chromium-expiry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("Cookies");
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute("CREATE TABLE meta (key TEXT, value TEXT)", []).unwrap();
+        c.execute("INSERT INTO meta VALUES ('version', '24')", []).unwrap();
+        c.execute(
+            "CREATE TABLE cookies (host_key TEXT, name TEXT, value TEXT, encrypted_value BLOB, expires_utc INTEGER, top_frame_site_key TEXT)",
+            [],
+        )
+        .unwrap();
+        let now = chrome_time(unix_now());
+        let hour = 3_600_000_000i64;
+        for (name, value, expires, partition) in [
+            ("SAPISID", "live", now + hour, ""),
+            ("SID", "stale", now - hour, ""),
+            ("HSID", "framed", now + hour, "https://example.org"),
+            ("PREF", "session", 0, ""),
+        ] {
+            c.execute(
+                "INSERT INTO cookies VALUES ('.youtube.com', ?1, ?2, x'', ?3, ?4)",
+                rusqlite::params![name, value, expires, partition],
+            )
+            .unwrap();
+        }
+        drop(c);
+        let h = cookies_from_db(&db, &mut Fixed(vec![])).unwrap();
+        assert!(h.contains("SAPISID=live") && h.contains("PREF=session"), "{h}");
+        assert!(!h.contains("stale") && !h.contains("framed"), "{h}");
+        std::fs::remove_dir_all(dir).ok();
+        // 2026-01-01T00:00:00Z on Chromium's clock
+        assert_eq!(chrome_time(1_767_225_600), 13_411_699_200_000_000);
     }
 
     #[test]

@@ -238,6 +238,14 @@ impl EqShared {
     pub fn get(&self) -> EqParams {
         self.params.read().map(|g| g.clone()).unwrap_or_default()
     }
+    /// For the output callback: the settings unless they are being written right now (`None`); never blocks.
+    pub fn try_get(&self) -> Option<EqParams> {
+        match self.params.try_read() {
+            Ok(g) => Some(g.clone()),
+            Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner().clone()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::Acquire)
     }

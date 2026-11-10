@@ -36,6 +36,8 @@ Smart downloads are opt-in; the rules' inputs (`liked`, `recent`, `queue`) are f
 **Loading seam (`src/pages/mod.rs`)** — the only entry point the page controller calls:
 `pages::load(&Request { target, query, filter }) -> Result<PageData, AppError>`, `pages::more(pager) -> Result<PageData, AppError>`
 (only the *new* items), `pages::home_loaders() -> Vec<HomeRow { slot, load }>` (run concurrently, show rows as they finish).
+Signed in, Home is one row: YouTube Music's own feed (`FEmusic_home`, fetched by `ytapi::home_feed`, read by `src/homefeed.rs`), with the built rows
+(history, charts, new releases) as the fallback and as the signed-out Home.
 The UI's `ItemsPage` still uses the legacy JSON loaders in `backend.rs` (`Backend.browse`); for album/playlist/artist pages those add `hero`,
 `shelves` and `radio` fields built by `src/pages/{album,playlist,artist}.rs` (`with_page_data`), so the page builders stay the single source of truth. Targets: `home`, `explore`, `album:ID`, `playlist:ID` (`LIKED` = liked music), `artist:ID`, `library:<playlists|albums|artists|songs|history>`.
 Rules: every list row/card has a cover (the QML `CoverImage` shows a themed placeholder; never leave art blank), `wikipedia_url` must be `https`.

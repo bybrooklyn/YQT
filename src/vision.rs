@@ -47,6 +47,24 @@ fn extract_visitor(html: &str) -> Option<String> {
     None
 }
 
+/// Why the formats of a video could not be had: worth another try later, or a real "no".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormatsError {
+    /// The request did not get through or the answer was unusable (offline, DNS, timeout, a broken or error page):
+    /// says nothing about the video, so trying again later can work.
+    Transient(String),
+    /// YouTube answered and there is nothing to play (removed, private, blocked, no plain stream).
+    Unavailable(String),
+}
+
+impl FormatsError {
+    pub fn into_message(self) -> String {
+        match self {
+            FormatsError::Transient(m) | FormatsError::Unavailable(m) => m,
+        }
+    }
+}
+
 async fn visitor(video_id: &str) -> Result<String, String> {
     if let Some((v, at)) = VISITOR.lock().unwrap().as_ref() {
         if at.elapsed() < Duration::from_secs(config::get().playback.visitor_cache_minutes * 60) {
@@ -157,6 +175,12 @@ fn remember_loudness(video_id: &str, formats: &[AudioFormat]) {
 /// Every plain-URL audio format of a video. A stale visitor id is the usual reason for a refusal,
 /// so one failure retries with a fresh session.
 pub async fn audio_formats(video_id: &str) -> Result<Vec<AudioFormat>, String> {
+    audio_formats_typed(video_id).await.map_err(FormatsError::into_message)
+}
+
+/// [`audio_formats`], but the error says whether it is worth retrying (the downloader needs to know: a network
+/// blip must not mark a song as unavailable).
+pub async fn audio_formats_typed(video_id: &str) -> Result<Vec<AudioFormat>, FormatsError> {
     match audio_formats_once(video_id).await {
         Ok(r) => Ok(r),
         Err(_) => {
@@ -164,6 +188,23 @@ pub async fn audio_formats(video_id: &str) -> Result<Vec<AudioFormat>, String> {
             audio_formats_once(video_id).await
         }
     }
+}
+
+/// Turn a `/player` answer into the usable audio formats. No streaming data = YouTube's own "no" (unavailable).
+fn formats_from_player(resp: &Value) -> Result<Vec<AudioFormat>, FormatsError> {
+    let status = resp["playabilityStatus"]["status"].as_str().unwrap_or("");
+    let Some(formats) = resp["streamingData"]["adaptiveFormats"].as_array() else {
+        let why = resp["playabilityStatus"]["reason"].as_str().unwrap_or(status);
+        return Err(FormatsError::Unavailable(format!("visionOS: no streams ({why})")));
+    };
+    let mut parsed = parse_formats(formats);
+    // The player and the downloader will fetch these URLs: only https Google/YouTube media hosts, never a loopback,
+    // LAN or arbitrary host that a hostile or tampered response might name.
+    parsed.retain(|f| is_media_url(&f.url));
+    if parsed.is_empty() {
+        return Err(FormatsError::Unavailable("visionOS: no audio format with a plain URL".to_owned()));
+    }
+    Ok(parsed)
 }
 
 /// Best audio-only stream URL for a video, plus its mime type (highest bitrate, any codec).
@@ -174,9 +215,10 @@ pub async fn audio_url(video_id: &str) -> Result<(String, String), String> {
         .ok_or_else(|| "visionOS: no audio format with a plain URL".to_owned())
 }
 
-async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> {
+async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, FormatsError> {
     let yt = &config::get().youtube;
-    let vd = visitor(video_id).await?;
+    // everything up to a parsed answer is transport: it failing says nothing about the video
+    let vd = visitor(video_id).await.map_err(FormatsError::Transient)?;
     let body = json!({
         "context": {"client": {
             "clientName": "VISIONOS", "clientVersion": yt.visionos_client_version,
@@ -200,23 +242,10 @@ async fn audio_formats_once(video_id: &str) -> Result<Vec<AudioFormat>, String> 
         .body(body.to_string())
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    let resp: Value =
-        serde_json::from_slice(&crate::state::read_limited(reply, crate::state::MAX_API_BODY).await?).map_err(|e| e.to_string())?;
-
-    let status = resp["playabilityStatus"]["status"].as_str().unwrap_or("");
-    let formats = resp["streamingData"]["adaptiveFormats"].as_array();
-    let Some(formats) = formats else {
-        let why = resp["playabilityStatus"]["reason"].as_str().unwrap_or(status);
-        return Err(format!("visionOS: no streams ({why})"));
-    };
-    let mut parsed = parse_formats(formats);
-    // The player and the downloader will fetch these URLs: only https Google/YouTube media hosts, never a loopback,
-    // LAN or arbitrary host that a hostile or tampered response might name.
-    parsed.retain(|f| is_media_url(&f.url));
-    if parsed.is_empty() {
-        return Err("visionOS: no audio format with a plain URL".to_owned());
-    }
+        .map_err(|e| FormatsError::Transient(e.to_string()))?;
+    let bytes = crate::state::read_limited(reply, crate::state::MAX_API_BODY).await.map_err(FormatsError::Transient)?;
+    let resp: Value = serde_json::from_slice(&bytes).map_err(|e| FormatsError::Transient(e.to_string()))?;
+    let parsed = formats_from_player(&resp)?;
     remember_loudness(video_id, &parsed);
     Ok(parsed)
 }
@@ -302,6 +331,21 @@ mod tests {
         assert_eq!(opus50.loudness_db, Some(-3.5));
         assert_eq!(f.iter().find(|x| x.itag == 140).unwrap().codec, Codec::Aac);
         assert!(parse_formats(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_player_answer_without_streams_is_unavailable_not_transient() {
+        let no = json!({"playabilityStatus": {"status": "ERROR", "reason": "Video unavailable"}});
+        assert_eq!(formats_from_player(&no), Err(FormatsError::Unavailable("visionOS: no streams (Video unavailable)".into())));
+        let ciphered = json!({"streamingData": {"adaptiveFormats": [{"itag":141,"mimeType":"audio/webm","signatureCipher":"x"}]}});
+        assert!(matches!(formats_from_player(&ciphered), Err(FormatsError::Unavailable(_))));
+        let ok = json!({"streamingData": {"adaptiveFormats": [
+            {"itag":140,"mimeType":"audio/mp4; codecs=\"mp4a.40.2\"","bitrate":130_000,"url":"https://rr1---sn-a.googlevideo.com/videoplayback?x=1"},
+            {"itag":251,"mimeType":"audio/webm; codecs=\"opus\"","bitrate":134_000,"url":"https://evil.example/x"}
+        ]}});
+        let f = formats_from_player(&ok).unwrap();
+        assert_eq!(f.iter().map(|x| x.itag).collect::<Vec<_>>(), [140], "untrusted hosts are dropped");
+        assert_eq!(FormatsError::Transient("dns".into()).into_message(), "dns");
     }
 
     #[test]

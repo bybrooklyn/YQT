@@ -58,6 +58,93 @@ fn io_err(msg: impl Into<String>) -> io::Error {
     io::Error::other(msg.into())
 }
 
+// ---------------------------------------------------------------------------------------------
+// interrupting a blocked read
+// ---------------------------------------------------------------------------------------------
+
+/// Lets another thread break a network read that the engine's command thread is blocked in.
+///
+/// The command thread also decodes, so a stalled upstream (connection open, no bytes) would keep `stop`, `load` and
+/// `seek` waiting for the read timeout. The caller of such a command `raise`s the interrupt *before* sending it; from
+/// then until the command thread `ack`s that very command, every network wait on that thread gives up at once (and
+/// new ones do not start). Nothing is lost by it: the response stays open and the decoder continues from the same
+/// sample later (see `TrackDecoder::next`).
+///
+/// It is installed per thread (`install`), not per stream: streams are opened on helper threads and then handed to
+/// the command thread, and it is the thread that must not be kept waiting. Helper threads are never interrupted.
+#[derive(Default)]
+pub struct Interrupt {
+    raised: std::sync::atomic::AtomicU64,
+    acked: std::sync::atomic::AtomicU64,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+/// How often a blocked read looks at the interrupt: the bound on how long a command waits for a stalled read.
+const INTERRUPT_POLL: Duration = Duration::from_millis(15);
+
+impl Interrupt {
+    /// A command that must not wait is on its way.
+    pub fn raise(&self) {
+        self.raised.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// One raised command has been taken up by the command thread.
+    pub fn ack(&self) {
+        self.acked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// For good (shutdown): every read on the thread fails from now on.
+    pub fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    pub fn pending(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.closed.load(SeqCst) || self.raised.load(SeqCst) != self.acked.load(SeqCst)
+    }
+}
+
+thread_local! {
+    static INTERRUPT: std::cell::RefCell<Option<std::sync::Arc<Interrupt>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Make network reads on the current thread interruptible through `i` (`None` removes it again).
+pub fn install_interrupt(i: Option<std::sync::Arc<Interrupt>>) {
+    INTERRUPT.with(|slot| *slot.borrow_mut() = i);
+}
+
+fn thread_interrupt() -> Option<std::sync::Arc<Interrupt>> {
+    INTERRUPT.with(|slot| slot.borrow().clone())
+}
+
+/// A command is waiting for the current thread: an I/O error right now is (or may as well be) that interruption.
+pub fn interrupt_pending() -> bool {
+    INTERRUPT.with(|slot| slot.borrow().as_ref().is_some_and(|i| i.pending()))
+}
+
+fn interrupted() -> io::Error {
+    io::Error::new(io::ErrorKind::ConnectionAborted, "interrupted by a newer command")
+}
+
+/// Drive `fut` on the audio runtime from this (blocking) thread; give up as soon as the thread's interrupt is pending.
+fn block_on_interruptible<T>(fut: impl std::future::Future<Output = T>) -> io::Result<T> {
+    let Some(int) = thread_interrupt() else { return Ok(runtime().block_on(fut)) };
+    if int.pending() {
+        return Err(interrupted());
+    }
+    runtime().block_on(async {
+        tokio::pin!(fut);
+        loop {
+            tokio::select! {
+                biased;
+                v = &mut fut => return Ok(v),
+                () = tokio::time::sleep(INTERRUPT_POLL) => {
+                    if int.pending() {
+                        return Err(interrupted());
+                    }
+                }
+            }
+        }
+    })
+}
+
 /// Forward seeks shorter than this are served by reading and discarding (keeps the connection).
 const SKIP_LIMIT: u64 = 32 * 1024;
 
@@ -101,8 +188,7 @@ impl HttpRangeSource {
 
     fn request(&self, from: u64) -> io::Result<reqwest::Response> {
         // Built and polled inside the runtime: constructing the client outside of it has no reactor to register with.
-        let resp = runtime()
-            .block_on(async { client().get(&self.url).header("Range", format!("bytes={from}-")).send().await })
+        let resp = block_on_interruptible(async { client().get(&self.url).header("Range", format!("bytes={from}-")).send().await })?
             .map_err(|e| io_err(format!("request failed: {}", e.without_url())))?;
         let st = resp.status();
         if st.as_u16() == 206 || (st.as_u16() == 200 && from == 0) {
@@ -117,7 +203,9 @@ impl HttpRangeSource {
     /// Next piece of the open response (or `None` at its end).
     fn next_chunk(&mut self) -> io::Result<Option<bytes::Bytes>> {
         let Some(resp) = self.resp.as_mut() else { return Ok(None) };
-        match runtime().block_on(resp.chunk()) {
+        // Giving up on the wait keeps the response: `chunk` holds no data between its polls, so the next call goes on
+        // with the same body.
+        match block_on_interruptible(resp.chunk())? {
             Ok(Some(b)) => Ok(Some(b)),
             Ok(None) => {
                 self.resp = None;

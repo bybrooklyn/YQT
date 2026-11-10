@@ -391,7 +391,12 @@ impl qobject::TrayMenuModel {
                 match tray.spawn().await {
                     Ok(handle) => {
                         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handle));
-                        let _ = th_ready.queue(|mut m| m.as_mut().set_available(true));
+                        let _ = th_ready.queue(|mut m| {
+                            // The tray was built from the menu as it was when `start` ran; whatever changed while it
+                            // was registering (a restored session, the sign-in state) is pushed now.
+                            m.as_ref().push_to_tray();
+                            m.as_mut().set_available(true);
+                        });
                     }
                     // No StatusNotifierWatcher / no session bus: simply no tray.
                     Err(e) => tracing::info!("no system tray: {e}"),
@@ -420,24 +425,29 @@ impl qobject::TrayMenuModel {
         }
         {
             let me = self.as_mut().rust_mut().get_mut();
-            me.entries = entries.clone();
-            me.tooltip = tip.clone();
+            me.entries = entries;
+            me.tooltip = tip;
         }
         let rev = self.revision().wrapping_add(1);
         self.as_mut().set_revision(rev);
         #[cfg(target_os = "linux")]
-        {
-            let running = self.rust().handle.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            if let Some(handle) = running {
-                crate::state::st().rt.spawn(async move {
-                    let _ = handle
-                        .update(move |t| {
-                            t.entries = entries;
-                            t.tooltip = tip;
-                        })
-                        .await;
-                });
-            }
+        self.as_ref().push_to_tray();
+    }
+
+    /// Send the current menu and tooltip to the running tray (nothing happens while there is none yet).
+    #[cfg(target_os = "linux")]
+    fn push_to_tray(&self) {
+        let running = self.rust().handle.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(handle) = running {
+            let (entries, tip) = (self.rust().entries.clone(), self.rust().tooltip.clone());
+            crate::state::st().rt.spawn(async move {
+                let _ = handle
+                    .update(move |t| {
+                        t.entries = entries;
+                        t.tooltip = tip;
+                    })
+                    .await;
+            });
         }
     }
 

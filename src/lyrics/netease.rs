@@ -107,13 +107,13 @@ pub fn candidate_from(song: &Song, v: &Value) -> Option<Candidate> {
         return None;
     }
     let text = v["lrc"]["lyric"].as_str()?;
-    let synced = drop_credit_lines(parse_lrc(text));
-    // Some records are plain text without stamps.
-    let plain = if synced.is_empty() {
-        text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
-    } else {
-        String::new()
-    };
+    let stamped = parse_lrc(text);
+    // Some records are plain text without stamps. (A record that is *only* stamped credit lines - an instrumental -
+    // has no lyrics at all: its raw text must not be passed off as plain lyrics.)
+    let unstamped = stamped.is_empty();
+    let synced = drop_credit_lines(stamped);
+    let plain =
+        if unstamped { text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n") } else { String::new() };
     if synced.is_empty() && plain.is_empty() {
         return None;
     }
@@ -176,6 +176,13 @@ mod tests {
         assert!(candidate_from(&song, &json!({"lrc": {"lyric": ""}})).is_none());
         assert!(candidate_from(&song, &json!({"lrc": {"lyric": "[00:00.00] 纯音乐，请欣赏"}})).is_some());
         // short record: the ranking rejects it as junk
+    }
+
+    #[test]
+    fn a_record_of_nothing_but_credits_has_no_lyrics() {
+        let song = Song { id: 1, title: "t".into(), artist: "a".into(), duration_s: None };
+        let credits = "[00:00.00] 作词 : A\n[00:01.00] 作曲 : B\n[00:02.00] 编曲 : C\n[00:03.00] 制作人 : D\n";
+        assert!(candidate_from(&song, &json!({"lrc": {"lyric": credits}})).is_none());
     }
 
     #[test]

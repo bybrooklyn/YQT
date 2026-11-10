@@ -42,7 +42,7 @@ pub fn from_result(r: Result<Option<String>, RpError>, q: &Query) -> Result<Vec<
         }]),
         Ok(_) => Ok(Vec::new()),
         Err(RpError::Extraction(ExtractionError::NotFound { .. } | ExtractionError::Unavailable { .. })) => Ok(Vec::new()),
-        Err(e) => Err(AppError::from_rustypipe(&e, false)),
+        Err(e) => Err(AppError::from_rustypipe_request(&e, false, false)),
     }
 }
 

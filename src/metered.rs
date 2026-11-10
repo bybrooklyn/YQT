@@ -114,8 +114,9 @@ impl Metered for NullMetered {
 pub struct NetworkManager;
 
 #[cfg(target_os = "linux")]
-impl Metered for NetworkManager {
-    fn state(&self) -> MeteredState {
+impl NetworkManager {
+    /// NetworkManager's raw `Metered` value; `None` = no answer (it is not running, no system bus, timeout).
+    fn query() -> Option<u32> {
         // zbus is async: run it on its own short-lived thread with a private runtime (like platform/linux.rs),
         // so this is safe to call from any thread, including inside the app's tokio runtime.
         let work = std::thread::Builder::new().name("ytm-metered".into()).spawn(|| {
@@ -138,11 +139,31 @@ impl Metered for NetworkManager {
                 .flatten()
             })
         });
-        work.ok().and_then(|h| h.join().ok()).flatten().map_or(MeteredState::Unknown, from_nm_metered)
+        work.ok().and_then(|h| h.join().ok()).flatten()
+    }
+}
+
+/// The note for a NetworkManager that gave `answer`: none when it answered, an explanation when it did not.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn nm_note(answer: Option<u32>) -> Option<&'static str> {
+    match answer {
+        Some(_) => None,
+        None => Some(
+            "NetworkManager did not answer, so metered connections cannot be detected on this system and downloads will not pause on them.",
+        ),
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Metered for NetworkManager {
+    fn state(&self) -> MeteredState {
+        Self::query().map_or(MeteredState::Unknown, from_nm_metered)
     }
 
+    /// Asks once (the downloads manager reads this at start-up): a system without NetworkManager (iwd,
+    /// systemd-networkd, ConnMan …) must say that the "pause on metered" setting cannot work, not stay silent.
     fn note(&self) -> Option<&'static str> {
-        None
+        nm_note(Self::query())
     }
 }
 
@@ -177,6 +198,14 @@ pub fn parse_power_supply(kind: &str, capacity: &str, status: &str) -> Option<Ba
     Some(BatteryStatus { percent, discharging: status.trim().eq_ignore_ascii_case("discharging") })
 }
 
+/// Does a power supply with this `scope` file power the computer itself? `Device` is the battery of a peripheral
+/// (wireless mouse, keyboard, headset): it says nothing about whether the machine is about to run out. No `scope`
+/// file or `System` = the machine's own.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn powers_the_system(scope: Option<&str>) -> bool {
+    !scope.is_some_and(|s| s.trim().eq_ignore_ascii_case("device"))
+}
+
 impl BatteryProbe for SystemBattery {
     fn status(&self) -> Option<BatteryStatus> {
         #[cfg(target_os = "linux")]
@@ -186,6 +215,9 @@ impl BatteryProbe for SystemBattery {
             names.sort();
             names.into_iter().find_map(|p| {
                 let read = |f: &str| std::fs::read_to_string(p.join(f)).ok();
+                if !powers_the_system(read("scope").as_deref()) {
+                    return None;
+                }
                 parse_power_supply(&read("type")?, &read("capacity")?, &read("status")?)
             })
         }
@@ -239,6 +271,23 @@ mod tests {
         for bad in ["", "abc", "-1", "101", "NaN"] {
             assert_eq!(parse_power_supply("Battery", bad, "Discharging"), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_peripherals_battery_is_not_the_computers() {
+        // hidpp_battery_0 (a wireless mouse) has `scope` = Device; a laptop battery has System or no scope file
+        assert!(!powers_the_system(Some("Device\n")));
+        assert!(!powers_the_system(Some("device")));
+        assert!(powers_the_system(Some("System\n")));
+        assert!(powers_the_system(Some("Unknown")));
+        assert!(powers_the_system(None));
+    }
+
+    #[test]
+    fn a_silent_network_manager_is_explained() {
+        assert_eq!(nm_note(Some(0)), None, "it answered (even with 'unknown'): detection works");
+        assert_eq!(nm_note(Some(4)), None);
+        assert!(nm_note(None).is_some_and(|n| n.contains("NetworkManager")));
     }
 
     #[test]

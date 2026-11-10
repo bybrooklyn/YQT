@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
-//! The few signed-in write calls RustyPipe doesn't have: like/unlike and add-to-playlist.
+//! The few signed-in calls RustyPipe doesn't have: like/unlike, add-to-playlist and the home feed.
 //! Authenticated like the YouTube Music web app: Cookie + SAPISIDHASH.
 use crate::auth::{stored_cookie, AUTH_MSG};
 use crate::state::http;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
-
-pub fn cookie_value<'a>(cookie: &'a str, name: &str) -> Option<&'a str> {
-    cookie.split(';').filter_map(|p| p.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v)
-}
 
 /// `SAPISIDHASH <ts>_<sha1("<ts> <SAPISID> <origin>")>`
 pub fn sapisid_hash(sapisid: &str, ts: u64, origin: &str) -> String {
@@ -56,7 +52,7 @@ pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
     let version_owned = client_version();
     let version = version_owned.as_str();
     let cookie = stored_cookie().ok_or(AUTH_MSG)?;
-    let sapisid = cookie_value(&cookie, "SAPISID").or_else(|| cookie_value(&cookie, "__Secure-3PAPISID")).ok_or(AUTH_MSG)?;
+    let sapisid = crate::auth::sapisid(&cookie).ok_or(AUTH_MSG)?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
     let auth = sapisid_hash(sapisid, ts, origin);
     Ok(vec![
@@ -76,11 +72,19 @@ fn web_remix_context() -> Value {
     json!({"client": {"clientName": "WEB_REMIX", "clientVersion": client_version(), "hl": yt.language}})
 }
 
-async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
+async fn post(endpoint: &str, body: Value) -> Result<Value, String> {
+    post_with(endpoint, &[], None, body).await
+}
+
+/// [`post`] with extra query parameters (a continuation is asked for in the address, like the web app does).
+async fn post_with(endpoint: &str, query: &[(&str, &str)], visitor: Option<&str>, mut body: Value) -> Result<Value, String> {
     let origin = trusted_origin(&crate::config::current().youtube.music_origin)?;
     let headers = auth_headers()?;
     body["context"] = web_remix_context();
-    let mut req = http().post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false"));
+    if let Some(visitor) = visitor {
+        body["context"]["client"]["visitorData"] = json!(visitor);
+    }
+    let mut req = http().post(format!("{origin}/youtubei/v1/{endpoint}?prettyPrint=false")).query(query);
     for (k, v) in headers {
         req = req.header(k, v);
     }
@@ -90,7 +94,9 @@ async fn post(endpoint: &str, mut body: Value) -> Result<Value, String> {
             let bytes = crate::state::read_limited(resp, crate::state::MAX_API_BODY).await?;
             serde_json::from_slice(&bytes).map_err(|e| e.to_string())
         }
-        401 | 403 => Err(AUTH_MSG.into()),
+        // 401 is the session; a 403 is a refusal of this one request (e.g. adding to a playlist that is not the user's)
+        // and is reported with YouTube's own explanation below, without signing the user out.
+        401 => Err(AUTH_MSG.into()),
         s => {
             // YouTube explains most rejections in `error.message`; surface it (bounded, no request data echoed).
             let text = match crate::state::read_limited(resp, 64 * 1024).await {
@@ -131,47 +137,25 @@ pub fn is_trusted_youtube_url(url: &str) -> bool {
 /// Ask YouTube (signed in) for the playback-tracking URL of a video. The URL is validated; an untrusted one is an
 /// error, so cookies are never sent anywhere unexpected.
 ///
-/// Uses the ANDROID_VR client: since early November 2026 YouTube answers the WEB_REMIX `/player` call with
-/// "Video unavailable" (no streaming data, no tracking), while ANDROID_VR still answers signed-in with both.
+/// Through the YouTube Music web player call in `challenge`. (The ANDROID_VR client this used for a while answers
+/// every cookie-signed call with HTTP 400, so no play was reported; the web client needs the player script's
+/// signature timestamp, without which it answers "Video unavailable".)
 pub async fn player_tracking_url(video_id: &str) -> Result<String, String> {
-    let origin = "https://www.youtube.com";
-    let cookie = stored_cookie().ok_or(AUTH_MSG)?;
-    let sapisid = cookie_value(&cookie, "SAPISID").or_else(|| cookie_value(&cookie, "__Secure-3PAPISID")).ok_or(AUTH_MSG)?;
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
-    let (name, version) = (ANDROID_VR_NAME, &crate::config::current().youtube.android_vr_client_version);
-    let body = json!({
-        "context": {"client": {
-            "clientName": name, "clientVersion": version, "hl": crate::config::current().youtube.language,
-            "androidSdkVersion": 32, "deviceMake": "Oculus", "deviceModel": "Quest 3", "osName": "Android", "osVersion": "12L"
-        }},
-        "videoId": video_id, "racyCheckOk": true, "contentCheckOk": true
-    });
-    let resp = http()
-        .post(format!("{origin}/youtubei/v1/player?prettyPrint=false"))
-        .header("Cookie", &cookie)
-        .header("Authorization", sapisid_hash(sapisid, ts, origin))
-        .header("Origin", origin)
-        .header("X-Origin", origin)
-        .header("X-Goog-AuthUser", "0")
-        .header("X-YouTube-Client-Name", "28")
-        .header("X-YouTube-Client-Version", version.as_str())
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| e.without_url().to_string())?;
-    if !resp.status().is_success() {
-        return Err(format!("YouTube returned HTTP {}", resp.status().as_u16()));
-    }
-    let v: Value = serde_json::from_slice(&crate::state::read_limited(resp, crate::state::MAX_API_BODY).await?).map_err(|e| e.to_string())?;
-    let url = extract_tracking_url(&v).ok_or("YouTube returned no playback-tracking URL")?;
-    if is_trusted_youtube_url(&url) {
-        Ok(url)
-    } else {
-        Err("YouTube returned an unexpected playback-tracking host".into())
-    }
+    crate::challenge::tracking_url(video_id).await
 }
 
-const ANDROID_VR_NAME: &str = "ANDROID_VR";
+/// One page of the signed-in home feed (`FEmusic_home`): the first, or the one a continuation token names. A next
+/// page needs the visitor id of the answer its token came from (`homefeed::visitor`), or YouTube answers an empty
+/// page. Read the answer with `homefeed::parse`.
+pub async fn home_feed(continuation: Option<(&str, &str)>) -> Result<Value, String> {
+    let body = json!({"browseId": "FEmusic_home"});
+    match continuation {
+        None => post("browse", body).await,
+        Some((token, visitor)) => {
+            post_with("browse", &[("ctoken", token), ("continuation", token), ("type", "next")], Some(visitor), body).await
+        }
+    }
+}
 
 pub async fn rate(video_id: &str, like: bool) -> Result<(), String> {
     post(if like { "like/like" } else { "like/removelike" }, json!({"target": {"videoId": video_id}})).await?;
@@ -297,12 +281,15 @@ mod tests {
     }
 
     #[test]
-    fn finds_cookie_values() {
-        assert_eq!(cookie_value("a=1; SAPISID=x; b=2", "SAPISID"), Some("x"));
-        assert_eq!(cookie_value("a=1", "SAPISID"), None);
+    fn the_signed_in_calls_use_the_same_login_cookie_rule_as_the_import() {
+        // a session carrying only `__Secure-1PAPISID` is accepted at import, so it must sign requests too
+        for cookie in ["a=1; SAPISID=x; b=2", "a=1; __Secure-3PAPISID=x", "__Secure-1PAPISID=x; b=2"] {
+            assert!(crate::auth::has_login_cookie(cookie));
+            assert_eq!(crate::auth::sapisid(cookie), Some("x"), "{cookie}");
+        }
+        assert_eq!(crate::auth::sapisid("a=1"), None);
     }
 }
-
 
 #[cfg(test)]
 mod live_tracking {
@@ -314,4 +301,3 @@ mod live_tracking {
         println!("RES tracking host ok: {}", super::is_trusted_youtube_url(&url));
     }
 }
-

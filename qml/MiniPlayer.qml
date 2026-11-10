@@ -3,7 +3,7 @@ import QtQuick
 import QtQuick.Window
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import org.kde.kirigami as Kirigami
 
 // A small always-available player window: cover, title, transport and progress. It reads the same state as the main

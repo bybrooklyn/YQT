@@ -342,7 +342,8 @@ pub async fn load(source: &str) -> Option<Vec<u8>> {
     } else if is_fetchable(source) {
         let h = hash_url(source);
         if !global().has(&h) {
-            fetch_into(global(), crate::state::http(), source).await.ok()?;
+            // the cover client, not the shared one: its redirect policy checks every hop (see `client`)
+            fetch_into(global(), client(), source).await.ok()?;
         }
         h
     } else {

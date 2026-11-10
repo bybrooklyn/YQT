@@ -189,7 +189,7 @@ pub fn check_dir(input: &str) -> Result<String, String> {
         return Err("That path is a file, not a folder.".into());
     }
     std::fs::create_dir_all(&path).map_err(|e| format!("Cannot create the folder: {e}"))?;
-    let probe = path.join(format!(".ytm-write-test-{}", std::process::id()));
+    let probe = path.join(format!(".yqt-write-test-{}", std::process::id()));
     std::fs::write(&probe, b"").map_err(|e| format!("The folder is not writable: {e}"))?;
     let _ = std::fs::remove_file(&probe);
     Ok(path.to_string_lossy().into_owned())
@@ -564,6 +564,21 @@ mod tests {
         let out = set(&t, "network.retries", Val::Float(2.6)).unwrap();
         assert_eq!(get(&out.text, "network.retries"), Val::Int(3));
         assert!(set(&t, "downloads.cap_gb", Val::Float(f64::NAN)).is_err());
+        // the download manager runs at most 8 at once: the page must not offer more than takes effect
+        let out = set(&t, "downloads.max_parallel", Val::Int(16)).unwrap();
+        assert_eq!(get(&out.text, "downloads.max_parallel"), Val::Int(8));
+    }
+
+    #[test]
+    fn a_bad_value_elsewhere_in_the_file_does_not_block_settings() {
+        // this used to reset everything to the defaults, after which no change was accepted
+        let src = "[network]\nconnect_timeout_secs = 1.5\n[reporting]\nenabled = false\n";
+        let out = set(src, "audio.gapless", Val::Bool(false)).unwrap();
+        assert_eq!(get(&out.text, "audio.gapless"), Val::Bool(false));
+        assert!(!out.config.reporting.enabled);
+        // and the bad value itself can be repaired from the page
+        let out = set(src, "network.connect_timeout_secs", Val::Int(15)).unwrap();
+        assert_eq!(out.config.network.connect_timeout_secs, 15);
     }
 
     #[test]

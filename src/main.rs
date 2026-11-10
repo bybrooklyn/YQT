@@ -9,6 +9,7 @@ mod audio_engine;
 mod audio_eq;
 mod auth;
 mod backend;
+mod challenge;
 mod clock;
 mod config;
 mod connectivity;
@@ -16,12 +17,13 @@ mod covercache;
 mod downloads;
 mod downloadsqml;
 mod errors;
+mod homefeed;
 mod items;
 mod logging;
-mod migrate;
 mod lyrics;
 mod lyrics_qt;
 mod metered;
+mod migrate;
 mod models;
 #[cfg(target_os = "linux")]
 mod mpris;
@@ -34,6 +36,9 @@ mod page;
 #[path = "mpris_stub.rs"]
 mod mpris_stub_check;
 mod nav;
+mod notify;
+#[cfg(target_os = "linux")]
+mod single;
 mod pagedata;
 mod pages;
 mod platform;
@@ -85,6 +90,12 @@ fn main() {
         return;
     }
     logging::init();
+    // Already running? Its window has been asked to come to the front; a second player is not started.
+    #[cfg(target_os = "linux")]
+    if single::claim() == single::Claim::AlreadyRunning {
+        tracing::info!("YQT is already running; showed its window instead of starting again");
+        return;
+    }
     if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
         let configured = config::get().ui.style.clone();
         let style = if !configured.is_empty() { configured } else { default_style() };
@@ -94,10 +105,11 @@ fn main() {
     // QSettings (volume, shuffle, repeat) needs these; without them it silently stores nothing.
     if let Some(mut app) = app.as_mut() {
         app.as_mut().set_organization_name(&QString::from("yqt"));
-        app.as_mut().set_organization_domain(&QString::from("kde.org"));
+        app.as_mut().set_organization_domain(&QString::from("bybrooklyn.dev"));
         app.as_mut().set_application_name(&QString::from("yqt"));
-        // Lets KDE/Wayland match the window to org.kde.yqt.desktop and so to its icon.
-        QGuiApplication::set_desktop_file_name(&QString::from("org.kde.yqt"));
+        app.as_mut().set_application_version(&QString::from(env!("CARGO_PKG_VERSION"))); // the About page reads it
+        // Lets KDE/Wayland match the window to dev.bybrooklyn.yqt.desktop and so to its icon.
+        QGuiApplication::set_desktop_file_name(&QString::from("dev.bybrooklyn.yqt"));
     }
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
@@ -110,11 +122,11 @@ fn main() {
             }
             match std::env::args().skip_while(|a| a != "--qml").nth(1) {
                 Some(path) => QUrl::from(&format!("file://{path}")),
-                None => QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml"),
+                None => QUrl::from("qrc:/qt/qml/dev/bybrooklyn/yqt/qml/Main.qml"),
             }
         };
         #[cfg(not(feature = "harness"))]
-        let entry = QUrl::from("qrc:/qt/qml/org/kde/ytm/qml/Main.qml");
+        let entry = QUrl::from("qrc:/qt/qml/dev/bybrooklyn/yqt/qml/Main.qml");
         engine.load(&entry);
     }
     if let Some(app) = app.as_mut() {

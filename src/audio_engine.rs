@@ -30,6 +30,7 @@ pub mod qobject {
         #[qproperty(i64, duration)] // ms, 0 = unknown
         #[qproperty(bool, playing)]
         #[qproperty(bool, loading)]
+        #[qproperty(bool, stalled)] // asked to play but the position is not advancing (opening, buffering)
         #[qproperty(QString, error)]
         type AudioEngine = super::AudioEngineRust;
 
@@ -79,6 +80,7 @@ pub struct AudioEngineRust {
     duration: i64,
     playing: bool,
     loading: bool,
+    stalled: bool,
     error: QString,
     engine: Option<Engine>,
     starting: bool,
@@ -91,6 +93,8 @@ pub struct AudioEngineRust {
     want_seek: u64,
     want_playing: bool,
     stop_poller: Arc<AtomicBool>,
+    /// Signals when a retired engine has let go of its device (a new one waits for that before opening its own).
+    closing: Option<Receiver<()>>,
 }
 
 impl Default for AudioEngineRust {
@@ -101,6 +105,7 @@ impl Default for AudioEngineRust {
             duration: 0,
             playing: false,
             loading: false,
+            stalled: false,
             error: QString::default(),
             engine: None,
             starting: false,
@@ -112,6 +117,7 @@ impl Default for AudioEngineRust {
             want_seek: 0,
             want_playing: false,
             stop_poller: Arc::new(AtomicBool::new(false)),
+            closing: None,
         }
     }
 }
@@ -119,8 +125,31 @@ impl Default for AudioEngineRust {
 impl Drop for AudioEngineRust {
     fn drop(&mut self) {
         self.stop_poller.store(true, Ordering::Relaxed);
+        if let Some(mut e) = self.engine.take() {
+            // The device is closed here (quick), so nothing touches the sound system while the app shuts down; only
+            // the wait for the feeder thread, which may sit in a network read, is left to another thread.
+            e.close_output();
+            let _ = retire(e);
+        }
     }
 }
+
+/// Shut an engine down without making the caller (the Qt thread) wait: dropping it joins its feeder thread, which
+/// may be in the middle of a network read, and closes the device. It is silenced at once; the rest happens elsewhere.
+/// The receiver yields (or disconnects) once the device has been closed, so a new engine can open it.
+fn retire(mut engine: Engine) -> Receiver<()> {
+    engine.pause();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("ytm-audio-retire".into()).spawn(move || {
+        engine.close_output();
+        let _ = tx.send(());
+        drop(engine);
+    });
+    rx
+}
+
+/// With `playing` on, a position that has not moved for this long means the engine is waiting for audio.
+const STALL_AFTER: Duration = Duration::from_millis(250);
 
 /// The engine plays what the app's own stream proxy serves (loopback only), never arbitrary URLs or file paths.
 fn is_local_stream(url: &str) -> bool {
@@ -144,11 +173,27 @@ impl qobject::AudioEngine {
         }
         let (device, settings) = (self.rust().device.clone(), self.rust().settings.clone());
         self.as_mut().rust_mut().get_mut().starting = true;
+        let closing = self.as_mut().rust_mut().get_mut().closing.take();
         let th = self.qt_thread();
         std::thread::spawn(move || {
+            if let Some(closed) = closing {
+                // the engine being replaced still holds its device for a moment (some devices open only once)
+                let _ = closed.recv_timeout(Duration::from_secs(5));
+            }
             let r = Engine::start(&backend_for(&device), settings);
             let _ = th.queue(move |mut q| {
                 q.as_mut().rust_mut().get_mut().starting = false;
+                if q.rust().device != device {
+                    // The output device was changed while this one was being opened: the newer choice wins.
+                    if let Ok((engine, _)) = r {
+                        let closing = retire(engine);
+                        q.as_mut().rust_mut().get_mut().closing = Some(closing);
+                    }
+                    if q.rust().want_url.is_some() {
+                        q.as_mut().ensure_started();
+                    }
+                    return;
+                }
                 match r {
                     Ok((engine, rx)) => q.as_mut().install(engine, rx),
                     Err(msg) => {
@@ -236,6 +281,7 @@ impl qobject::AudioEngine {
         }
         self.as_mut().set_playing(false);
         self.as_mut().set_loading(false);
+        self.as_mut().set_stalled(false);
         self.as_mut().set_position(0);
         self.as_mut().set_duration(0);
     }
@@ -290,9 +336,11 @@ impl qobject::AudioEngine {
             if me.engine.is_some() {
                 me.want_seek = pos;
             }
-            // dropping the engine stops its threads and closes the old device
+            // retiring the engine stops its threads and closes the old device (not on this thread: that can take a while)
             me.stop_poller.store(true, Ordering::Relaxed);
-            me.engine = None;
+            if let Some(e) = me.engine.take() {
+                me.closing = Some(retire(e));
+            }
         }
         if self.rust().want_url.is_some() {
             self.ensure_started();
@@ -310,7 +358,9 @@ fn spawn_poller(th: cxx_qt::CxxQtThread<qobject::AudioEngine>, status: Status, r
         let (mut last_pos, mut last_dur, mut last_play, mut last_load) = (i64::MIN, i64::MIN, false, false);
         let mut pending_end = false;
         let mut last_pos_at = std::time::Instant::now();
+        let (mut moved_pos, mut moved_at, mut last_stalled) = (i64::MIN, std::time::Instant::now(), false);
         while !stop.load(Ordering::Relaxed) {
+            status.deliver_events(); // also while the feeder thread is busy (a slow network read)
             for ev in rx.try_iter() {
                 match ev {
                     Event::Loaded(_) => {
@@ -344,12 +394,18 @@ fn spawn_poller(th: cxx_qt::CxxQtThread<qobject::AudioEngine>, status: Status, r
                 status.set_playing(false);
             }
             let (pos, dur, play, load) = (status.position_ms(), status.duration_ms(), status.playing(), status.loading());
+            // Told to play but the position stands still (a stream is being opened, the network fell behind, nothing
+            // is left to play): say so, so the UI's clock does not run ahead of the audio.
+            if pos != moved_pos || play != last_play {
+                (moved_pos, moved_at) = (pos, std::time::Instant::now());
+            }
+            let stalled = play && moved_at.elapsed() >= STALL_AFTER;
             let pos_due = pos != last_pos && (last_pos_at.elapsed() >= Duration::from_millis(90) || !play || pos.abs_diff(last_pos) > 400);
-            if pos_due || (dur != last_dur && dur != 0) || play != last_play || load != last_load {
+            if pos_due || (dur != last_dur && dur != 0) || play != last_play || load != last_load || stalled != last_stalled {
                 if pos_due {
                     (last_pos, last_pos_at) = (pos, std::time::Instant::now());
                 }
-                (last_dur, last_play, last_load) = (if dur != 0 { dur } else { last_dur }, play, load);
+                (last_dur, last_play, last_load, last_stalled) = (if dur != 0 { dur } else { last_dur }, play, load, stalled);
                 let r = th.queue(move |mut q| {
                     q.as_mut().set_position(pos);
                     if dur != 0 {
@@ -357,6 +413,7 @@ fn spawn_poller(th: cxx_qt::CxxQtThread<qobject::AudioEngine>, status: Status, r
                     }
                     q.as_mut().set_playing(play);
                     q.as_mut().set_loading(load);
+                    q.as_mut().set_stalled(stalled);
                 });
                 if r.is_err() {
                     return; // the QObject is gone

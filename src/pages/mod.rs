@@ -63,13 +63,15 @@ where
         }
         r => r,
     };
-    result.map_err(|e| AppError::from_rustypipe(&e, false))
+    result.map_err(|e| AppError::from_rustypipe_request(&e, false, false))
 }
 
 // ---- continuation of track lists (playlists) ------------------------------------------------------------------
 
 /// Pager ids of this module start here, far above the ids the legacy loaders hand out.
 const PAGER_BASE: u32 = 1 << 30;
+/// How many partially loaded lists are remembered at once.
+const MAX_CONTS: usize = 16;
 
 struct TrackCont {
     pager: Paginator<TrackItem>,
@@ -87,15 +89,35 @@ fn conts<R>(f: impl FnOnce(&mut HashMap<u32, TrackCont>) -> R) -> R {
 /// Remember a partially loaded track list; the returned id goes in `PageData::pager`.
 pub(crate) fn register_tracks(pager: Paginator<TrackItem>, cover: String, shown: usize) -> u32 {
     let id = NEXT_CONT.fetch_add(1, Ordering::Relaxed) + 1;
-    conts(|m| m.insert(id, TrackCont { pager, cover, shown }));
+    conts(|m| {
+        m.insert(id, TrackCont { pager, cover, shown });
+        drop_oldest(m, MAX_CONTS);
+    });
     id
+}
+
+/// Lists nobody pages to the end (or forgets) must not pile up. Ids only grow, so the smallest is the oldest.
+fn drop_oldest<T>(m: &mut HashMap<u32, T>, max: usize) {
+    while m.len() > max {
+        let Some(&oldest) = m.keys().min() else { break };
+        m.remove(&oldest);
+    }
+}
+
+/// Forget a partially loaded list whose page is not going to ask for more.
+pub fn forget(pager: u32) {
+    if pager > PAGER_BASE {
+        conts(|m| m.remove(&pager));
+    } else {
+        crate::backend::drop_pager(pager as i32); // a list of the legacy loaders (Liked music, search)
+    }
 }
 
 async fn more_tracks(id: u32) -> Result<PageData, AppError> {
     let mut cont = conts(|m| m.remove(&id)).ok_or_else(|| AppError::new(ErrorKind::NotFound, "No more results", ""))?;
     if let Err(e) = cont.pager.extend(&st().rp.query()).await {
         conts(|m| m.insert(id, cont)); // allow a retry
-        return Err(AppError::from_rustypipe(&e, false));
+        return Err(AppError::from_rustypipe_request(&e, false, false));
     }
     let new = common::numbered_tracks(cont.pager.items.get(cont.shown..).unwrap_or_default(), &cont.cover, cont.shown);
     cont.shown = cont.pager.items.len();
@@ -191,14 +213,17 @@ pub struct HomeRow {
     pub load: Pin<Box<dyn Future<Output = Result<Vec<Section>, AppError>> + Send>>,
 }
 
-/// The rows of Home, to be run concurrently and shown as each completes. Signed-out users get no personal row.
+/// The rows of Home, to be run concurrently and shown as each completes. Signed in that is one row: the account's
+/// own YouTube Music feed (or the built rows if there is none). Signed-out users get charts and new releases.
 pub fn home_loaders() -> Vec<HomeRow> {
-    use crate::backend::{home_charts, home_new_albums, home_new_videos, home_personal, Row};
+    use crate::backend::{home_charts, home_new_albums, home_new_videos, home_signed_in, Row};
     fn adapt(f: impl Future<Output = Row> + Send + 'static) -> Pin<Box<dyn Future<Output = Result<Vec<Section>, AppError>> + Send>> {
         Box::pin(async move { f.await.map(|items| home::restyle_all(sections_from_items(&items))).map_err(|e| error_from_ui_string(&e)) })
     }
+    if crate::backend::is_logged_in() {
+        return vec![HomeRow { slot: 0, load: adapt(home_signed_in()) }];
+    }
     vec![
-        HomeRow { slot: 0, load: adapt(home_personal()) },
         HomeRow { slot: 1, load: adapt(home_charts()) },
         HomeRow { slot: 2, load: adapt(home_new_albums()) },
         HomeRow { slot: 3, load: adapt(home_new_videos()) },
@@ -257,6 +282,19 @@ mod tests {
         let id = register_tracks(Paginator::default(), String::new(), 0);
         assert!(id > PAGER_BASE);
         assert!(conts(|m| m.remove(&id)).is_some());
+    }
+
+    #[test]
+    fn remembered_lists_are_bounded_and_can_be_forgotten() {
+        let first = register_tracks(Paginator::default(), String::new(), 0);
+        forget(first);
+        assert!(conts(|m| !m.contains_key(&first)));
+        // (on a map of its own: the shared one is used by the other tests at the same time)
+        let mut m: HashMap<u32, ()> = (1..=20).map(|id| (id, ())).collect();
+        drop_oldest(&mut m, 16);
+        let mut left: Vec<u32> = m.into_keys().collect();
+        left.sort_unstable();
+        assert_eq!(left, (5..=20).collect::<Vec<u32>>(), "the oldest go first");
     }
 
     #[test]

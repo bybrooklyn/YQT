@@ -119,15 +119,20 @@ impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for RedactMaker<M> {
     }
 }
 
-/// Remove all but the newest `keep` rotated `yqt.*.log` files and tighten the rest to 0600.
+/// The date part of a rotated log's name (`yqt.2026-01-09.log`, or `ytm.…` written under the app's old name and
+/// brought along by the folder migration), so both age out together, oldest first.
+fn log_date(path: &std::path::Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let rest = name.strip_prefix("yqt.").or_else(|| name.strip_prefix("ytm."))?;
+    rest.strip_suffix(".log").map(str::to_owned)
+}
+
+/// Remove all but the newest `keep` rotated `yqt.*.log` (and old `ytm.*.log`) files and tighten the rest to 0600.
 fn tidy_logs(dir: &std::path::Path, keep: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
-    let mut files: Vec<_> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("yqt.") && n.to_string_lossy().ends_with(".log")))
-        .collect();
-    files.sort();
+    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| log_date(p).is_some()).collect();
+    // by date, and on the same day the old name counts as the older one
+    files.sort_by_key(|p| (log_date(p), std::cmp::Reverse(p.file_name().map(|n| n.to_os_string()))));
     let excess = files.len().saturating_sub(keep);
     for p in files.drain(..excess) {
         let _ = std::fs::remove_file(p);
@@ -163,6 +168,7 @@ pub fn init() {
     });
     let registry = tracing_subscriber::registry();
     let ok = if let Some(appender) = file_layer {
+        let _ = LOG_DIR.set(dir.clone());
         let (nb, guard) = tracing_appender::non_blocking(appender);
         let _ = GUARD.set(guard);
         let file = tracing_subscriber::fmt::layer().with_writer(RedactMaker { inner: nb, redact }).with_ansi(false).with_filter(filter());
@@ -189,9 +195,45 @@ fn install_panic_hook(redact_on: bool) {
         };
         let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
         let note = crash_note(&msg, &loc, redact_on);
-        tracing::error!("{note}");
+        // Straight into today's log file, synchronously: the file layer hands lines to a background writer, and a
+        // process that is about to die (a panic under Qt aborts at once) would exit before that writer got to it.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let written = LOG_DIR.get().is_some_and(|dir| append_crash_note(dir, now, &note).is_ok());
+        if !written {
+            tracing::error!("{note}");
+        }
         eprintln!("{note}");
     }));
+}
+
+/// Where the log files are, once the file layer is up (the panic hook writes there directly).
+static LOG_DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// `YYYY-MM-DD` (UTC) of a Unix time: the date in the name of the rotated log file (`yqt.<date>.log`).
+fn utc_date(unix_secs: u64) -> String {
+    // civil-from-days (Howard Hinnant's algorithm), for dates from 1970 on
+    let z = unix_secs / 86_400 + 719_468;
+    let (era, doe) = (z / 146_097, z % 146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let (day, month) = (doy - (153 * mp + 2) / 5 + 1, if mp < 10 { mp + 3 } else { mp - 9 });
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Append the (already redacted) crash note to the day's log file, creating it private if it is not there yet.
+fn append_crash_note(dir: &std::path::Path, unix_secs: u64, note: &str) -> std::io::Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(dir.join(format!("yqt.{}.log", utc_date(unix_secs))))?;
+    f.write_all(format!("{} ERROR {note}\n", utc_date(unix_secs)).as_bytes())?;
+    f.sync_all()
 }
 
 /// The single-line crash note logged by the panic hook.
@@ -337,6 +379,58 @@ mod tests {
         assert!(!n.contains('\n') && !n.contains("topsecret"), "{n}");
         assert!(n.starts_with("panic at src/x.rs:1"));
         assert!(crash_note("SAPISID=topsecret", "l", false).contains("topsecret"));
+    }
+
+    #[test]
+    fn crash_note_goes_straight_into_the_days_log_file() {
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(951_782_400), "2000-02-29");
+        assert_eq!(utc_date(1_767_225_599), "2025-12-31");
+        assert_eq!(utc_date(1_767_225_600), "2026-01-01");
+        assert_eq!(utc_date(1_794_268_800), "2026-11-10");
+        let d = std::env::temp_dir().join(format!("yqt-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join("yqt.2026-01-01.log");
+        std::fs::write(&file, "earlier line\n").unwrap();
+        // no flush, no background writer: the line is in the file when the call returns, after what was there
+        append_crash_note(&d, 1_767_225_600, &crash_note("boom SAPISID=topsecret", "src/x.rs:1", true)).unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("earlier line\n") && text.ends_with('\n'), "{text}");
+        assert!(text.contains("panic at src/x.rs:1: boom") && !text.contains("topsecret"), "{text}");
+        // a day without a file yet: created, and private
+        append_crash_note(&d, 1_767_225_600 + 86_400, "panic at l: x").unwrap();
+        let new = d.join("yqt.2026-01-02.log");
+        assert!(new.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&new).unwrap().permissions().mode() & 0o077, 0);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn logs_written_under_the_old_name_age_out_too() {
+        let d = std::env::temp_dir().join(format!("yqt-logs-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for i in 1..=5 {
+            std::fs::write(d.join(format!("ytm.2026-01-0{i}.log")), "x").unwrap();
+        }
+        for i in 5..=9 {
+            std::fs::write(d.join(format!("yqt.2026-01-0{i}.log")), "x").unwrap();
+        }
+        std::fs::write(d.join("ytm.conf"), "keep").unwrap();
+        tidy_logs(&d, 7);
+        let mut names: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        // the three oldest days go (all under the old name); on the shared day both stay
+        let kept = ["yqt.2026-01-05.log", "yqt.2026-01-06.log", "yqt.2026-01-07.log", "yqt.2026-01-08.log", "yqt.2026-01-09.log"];
+        let mut want: Vec<String> = kept.iter().map(|s| (*s).to_owned()).collect();
+        want.extend(["ytm.2026-01-04.log".to_owned(), "ytm.2026-01-05.log".to_owned(), "ytm.conf".to_owned()]);
+        assert_eq!(names, want);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[cfg(unix)]

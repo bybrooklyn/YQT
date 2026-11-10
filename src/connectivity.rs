@@ -101,14 +101,25 @@ pub fn check_now() {
 pub async fn probe_once() -> bool {
     let attempt = async {
         let addrs = tokio::net::lookup_host((PROBE_HOST, PROBE_PORT)).await.ok()?;
-        for a in addrs {
-            if tokio::net::TcpStream::connect(a).await.is_ok() {
-                return Some(());
-            }
-        }
-        None
+        connect_any(addrs).await.then_some(())
     };
     tokio::time::timeout(PROBE_TIMEOUT, attempt).await.ok().flatten().is_some()
+}
+
+/// Does any of `addrs` accept a TCP connection? They are tried all at once and the first success wins: one address
+/// that never answers (typically IPv6 on a network where only IPv4 works) must not use up the whole time budget
+/// before the working ones get their turn.
+async fn connect_any(addrs: impl IntoIterator<Item = std::net::SocketAddr>) -> bool {
+    let mut tries = tokio::task::JoinSet::new();
+    for a in addrs {
+        tries.spawn(async move { tokio::net::TcpStream::connect(a).await.is_ok() });
+    }
+    while let Some(done) = tries.join_next().await {
+        if done.unwrap_or(false) {
+            return true; // (dropping the set aborts the attempts still running)
+        }
+    }
+    false
 }
 
 /// Start the background probe loop (once per process).
@@ -238,6 +249,36 @@ mod tests {
         assert_eq!(m.next_delay(), OFFLINE_MAX);
         assert!(m.record(true));
         assert_eq!(m.next_delay(), ONLINE_INTERVAL);
+    }
+
+    #[tokio::test]
+    async fn one_address_that_never_answers_does_not_hide_a_working_one() {
+        use std::net::SocketAddr;
+        // A listener whose accept queue is full never completes another handshake: connecting to it hangs, like a
+        // blackholed IPv6 route does.
+        let sock = tokio::net::TcpSocket::new_v4().unwrap();
+        sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let hang = sock.listen(1).unwrap(); // never accepted from
+        let hang_addr = hang.local_addr().unwrap();
+        let mut fillers = Vec::new();
+        let hangs = loop {
+            match tokio::time::timeout(Duration::from_millis(300), tokio::net::TcpStream::connect(hang_addr)).await {
+                Ok(Ok(s)) if fillers.len() < 64 => fillers.push(s),
+                Ok(_) => break false, // this system never fills up (or refused): the ordering below is still checked
+                Err(_) => break true,
+            }
+        };
+        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_addr = good.local_addr().unwrap();
+        let closed: SocketAddr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap() // dropped: nothing listens there any more
+        };
+        // the dead ones come first, as a resolver that prefers IPv6 would order them
+        let found = tokio::time::timeout(Duration::from_secs(3), connect_any([hang_addr, closed, good_addr])).await;
+        assert_eq!(found, Ok(true), "found the working address without waiting for the others (hanging one: {hangs})");
+        assert!(!connect_any([closed]).await);
+        assert!(!connect_any(Vec::<SocketAddr>::new()).await);
     }
 
     #[tokio::test]

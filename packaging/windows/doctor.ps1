@@ -1,5 +1,7 @@
 # Checks that everything needed to build YQT on Windows is present, and says what is missing.
-. "$PSScriptRoot\env.ps1" 2>&1 | Out-Null
+# env.ps1 throws when qmake is missing, which is exactly what this script is here to report: carry on to the checklist.
+try { . "$PSScriptRoot\env.ps1" 2>&1 | Out-Null } catch { }
+$ErrorActionPreference = 'Continue'
 $ok = $true
 function Check($name, $pass, $hint) {
     if ($pass) { Write-Host "  ok       $name" } else { Write-Host "  MISSING  $name  -> $hint"; $script:ok = $false }

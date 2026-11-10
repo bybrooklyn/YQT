@@ -6,6 +6,11 @@
 #![allow(dead_code)] // `AppError` and friends are the shared contract; the UI workstreams start using them
 
 use crate::auth::AUTH_MSG;
+
+/// Headline for a signed-in request that was answered with a page the parser can't read: most often YouTube's
+/// "sign in to see this" page, sent because the session is no longer accepted.
+pub const SESSION_SUSPECT_MSG: &str =
+    "YouTube sent a page the app couldn't read. Your session may have just rotated – try again in a moment, or sign in again from Settings.";
 use rustypipe::error::{Error, ExtractionError};
 use serde::Serialize;
 
@@ -122,8 +127,16 @@ impl AppError {
 
     /// Classify a RustyPipe error. `signed_in` tailors the advice for unreadable pages.
     pub fn from_rustypipe(e: &Error, signed_in: bool) -> AppError {
+        Self::from_rustypipe_request(e, signed_in, true)
+    }
+
+    /// [`from_rustypipe`](Self::from_rustypipe) for a request known to have been sent with (`authenticated`) or
+    /// without the user's session. A 401/403 answer to an anonymous request (a blocked address, a bot check) says
+    /// nothing about the session and must not be reported as "your session expired".
+    pub fn from_rustypipe_request(e: &Error, signed_in: bool, authenticated: bool) -> AppError {
         let detail = e.to_string();
         match e {
+            Error::HttpStatus(401 | 403, _) if !authenticated => AppError::new(ErrorKind::Internal, "YouTube refused the request.", detail),
             Error::Auth(_) | Error::HttpStatus(401 | 403, _) => {
                 // the headline *is* the session message (backend.rs compares for equality to flip the signed-in state)
                 let mut err = AppError::new(ErrorKind::Auth, AUTH_MSG, "");
@@ -139,11 +152,10 @@ impl AppError {
                 // InvalidData and friends: YouTube answered, but with a page the parser doesn't understand.
                 // For a signed-in user the usual cause is a session that was just rotated (YouTube then answers
                 // with a "sign in to see this" message page).
-                _ if signed_in => AppError::new(
-                    ErrorKind::Parse,
-                    "YouTube sent a page the app couldn't read. Your session may have just rotated – try again in a moment, or sign in again from Settings.",
-                    detail,
-                ),
+                // (Seen live: the Library answered `logged_in=0` with a "Looking for what you've liked?" page once
+                // the copied session had gone stale. The backend takes this headline as a reason to check the
+                // session, and renew it, see `backend::finish`.)
+                _ if signed_in && authenticated => AppError::new(ErrorKind::Parse, SESSION_SUSPECT_MSG, detail),
                 _ => AppError::new(ErrorKind::Parse, "YouTube sent a page the app couldn't read. It may have changed – try again later.", detail),
             },
             Error::HttpStatus(429, _) => AppError::new(ErrorKind::RateLimit, "YouTube is rate-limiting requests. Wait a minute and try again.", detail),
@@ -374,6 +386,11 @@ pub fn friendly(e: &Error, signed_in: bool) -> String {
     AppError::from_rustypipe(e, signed_in).ui_string()
 }
 
+/// [`friendly`] for a request known to have been sent with or without the user's session.
+pub fn friendly_request(e: &Error, signed_in: bool, authenticated: bool) -> String {
+    AppError::from_rustypipe_request(e, signed_in, authenticated).ui_string()
+}
+
 /// Should an authenticated request that failed this way be retried once? These are the
 /// transient "unreadable page" and rate/availability blips, not real, lasting errors.
 pub fn worth_retrying(e: &Error) -> bool {
@@ -409,6 +426,23 @@ mod tests {
         // backend.rs compares for equality to flip the signed-in state, so this must stay exact
         assert_eq!(friendly(&Error::HttpStatus(401, "x".into()), true), AUTH_MSG);
         assert_eq!(friendly(&Error::HttpStatus(403, "x".into()), true), AUTH_MSG);
+    }
+
+    #[test]
+    fn a_refused_anonymous_request_is_not_a_session_problem() {
+        for code in [401, 403] {
+            let e = Error::HttpStatus(code, "x".into());
+            for signed_in in [true, false] {
+                let anon = AppError::from_rustypipe_request(&e, signed_in, false);
+                assert_eq!(anon.kind, ErrorKind::Internal, "{code}");
+                assert_ne!(anon.ui_string(), AUTH_MSG, "the backend signs the user out on this exact text");
+                assert_ne!(friendly_request(&e, signed_in, false), AUTH_MSG);
+            }
+            // the same answer to a request that carried the session does mean the session is gone
+            assert_eq!(friendly_request(&e, true, true), AUTH_MSG);
+        }
+        // RustyPipe's own "not signed in" is about the session whatever the request was
+        assert_eq!(friendly_request(&Error::Auth(rustypipe::error::AuthError::NoLogin), false, false), AUTH_MSG);
     }
 
     #[test]

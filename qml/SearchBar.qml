@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import QtQuick
-import org.kde.ytm
+import dev.bybrooklyn.yqt
 import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -18,6 +18,8 @@ Item {
 
     function focusSearch() { searchField.forceActiveFocus(); searchField.selectAll() }
     onQueryChanged: searchField.text = query
+    // The search was started: suggestions still on their way (or about to be asked for) must not pop up over the results.
+    function dropSuggestions() { suggestTimer.stop(); suggestId = -1 }
 
     Connections {
         target: Backend
@@ -36,6 +38,7 @@ Item {
         autoAccept: false
         Component.onCompleted: text = bar.query
         onAccepted: {
+            bar.dropSuggestions()
             suggestPopup.close()
             if (text.trim() !== bar.query) applicationWindow().search(text)
         }
@@ -81,7 +84,7 @@ Item {
                     width: ListView.view.width
                     text: modelData
                     icon.name: ListView.view.recents ? "document-open-recent" : "search"
-                    onClicked: { suggestPopup.close(); searchField.text = modelData; applicationWindow().search(modelData) }
+                    onClicked: { bar.dropSuggestions(); suggestPopup.close(); searchField.text = modelData; applicationWindow().search(modelData) }
                 }
             }
         }

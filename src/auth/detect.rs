@@ -54,6 +54,7 @@ pub fn default_browser_id(token: &str) -> Option<&'static str> {
         ("vivaldi", "vivaldi"),
         ("msedge", "edge"),
         ("microsoft-edge", "edge"),
+        ("microsoft.edge", "edge"), // flatpak: com.microsoft.Edge.desktop
         ("edgemac", "edge"),
         ("opera", "opera"),
         ("librewolf", "librewolf"),
@@ -125,6 +126,7 @@ mod tests {
         assert_eq!(default_browser_id("com.google.chrome"), Some("chrome"));
         assert_eq!(default_browser_id("ChromeHTML"), Some("chrome"));
         assert_eq!(default_browser_id("MSEdgeHTM"), Some("edge"));
+        assert_eq!(default_browser_id("com.microsoft.Edge.desktop"), Some("edge"));
         assert_eq!(default_browser_id("com.microsoft.edgemac"), Some("edge"));
         assert_eq!(default_browser_id("BraveHTML"), Some("brave"));
         assert_eq!(default_browser_id("FirefoxURL-308046B0AF4A39CB"), Some("firefox"));

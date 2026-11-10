@@ -167,9 +167,7 @@ impl qobject::Downloads {
     }
 
     fn download_all(self: Pin<&mut Self>, items_json: &QString) {
-        for it in parse_items(items_json) {
-            manager::enqueue(it);
-        }
+        manager::enqueue_all(parse_items(items_json)); // one index write for the whole album / playlist
     }
 
     fn remove(self: Pin<&mut Self>, video_id: &QString) {
