@@ -251,9 +251,7 @@ pub fn start(forward: impl Fn(&str, i64) + Send + Sync + 'static) {
         return; // already running
     }
     st().rt.spawn(async {
-        let built = zbus::connection::Builder::session()
-            .and_then(|b| b.serve_at(PATH, Root))
-            .and_then(|b| b.serve_at(PATH, PlayerIface));
+        let built = zbus::connection::Builder::session().and_then(|b| b.serve_at(PATH, Root)).and_then(|b| b.serve_at(PATH, PlayerIface));
         match built {
             Ok(b) => match b.build().await {
                 Ok(c) => {

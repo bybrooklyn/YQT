@@ -89,12 +89,27 @@ QQC2.ToolBar {
                 }
             }
 
-            QQC2.ToolButton {
+            LikeButton {
+                id: likeButton
                 visible: Backend.loggedIn
-                readonly property bool liked: { Backend.likedRev; return Backend.isLiked(Player.videoId) }
-                icon.name: liked ? "starred-symbolic" : "non-starred-symbolic"
-                onClicked: Backend.setLiked(Player.videoId, !liked)
+                property int request: -1     // the like that is on its way to YouTube
+                // The revision is part of the value, not a statement on the side: a read whose result is thrown away
+                // can be dropped when the QML is compiled, and the star then never follows a like.
+                liked: Backend.likedRev >= 0 && Backend.isLiked(Player.videoId)
+                sending: request >= 0
+                property bool asked: false   // what the like on its way asked for
+                onToggled: like => { asked = like; request = Backend.setLiked(Player.videoId, like) }
                 QQC2.ToolTip.visible: hovered; QQC2.ToolTip.text: liked ? qsTr("Remove from liked music") : qsTr("Like")
+                Connections {
+                    target: Backend
+                    function onDone(id, err, json) {
+                        if (id !== likeButton.request) return
+                        likeButton.request = -1
+                        if (err) return                   // (a refusal puts the star back and is reported by Main.qml)
+                        likeButton.accepted()
+                        applicationWindow().showPassiveNotification(likeButton.asked ? qsTr("Added to liked music") : qsTr("Removed from liked music"))
+                    }
+                }
             }
             QQC2.ToolButton {
                 icon.name: "media-playlist-shuffle"

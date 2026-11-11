@@ -156,9 +156,15 @@ impl AppError {
                 // the copied session had gone stale. The backend takes this headline as a reason to check the
                 // session, and renew it, see `backend::finish`.)
                 _ if signed_in && authenticated => AppError::new(ErrorKind::Parse, SESSION_SUSPECT_MSG, detail),
-                _ => AppError::new(ErrorKind::Parse, "YouTube sent a page the app couldn't read. It may have changed – try again later.", detail),
+                _ => AppError::new(
+                    ErrorKind::Parse,
+                    "YouTube sent a page the app couldn't read. It may have changed – try again later.",
+                    detail,
+                ),
             },
-            Error::HttpStatus(429, _) => AppError::new(ErrorKind::RateLimit, "YouTube is rate-limiting requests. Wait a minute and try again.", detail),
+            Error::HttpStatus(429, _) => {
+                AppError::new(ErrorKind::RateLimit, "YouTube is rate-limiting requests. Wait a minute and try again.", detail)
+            }
             Error::HttpStatus(code, _) if *code >= 500 => {
                 AppError::new(ErrorKind::Network, "YouTube is having problems right now. Try again shortly.", detail)
             }

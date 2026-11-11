@@ -162,6 +162,24 @@ pub async fn rate(video_id: &str, like: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether YouTube has this song as liked, read from its watch page (`likeButtonRenderer.likeStatus`). `None` when
+/// the page states no heart for it.
+pub async fn like_status(video_id: &str) -> Result<Option<bool>, String> {
+    let v = post("next", json!({"videoId": video_id})).await?;
+    Ok(find_like_status(&v).map(|s| s == "LIKE"))
+}
+
+/// The first `likeButtonRenderer.likeStatus` anywhere in an answer (`LIKE` / `INDIFFERENT` / `DISLIKE`).
+pub fn find_like_status(v: &Value) -> Option<&str> {
+    match v {
+        Value::Object(m) => {
+            m.get("likeButtonRenderer").and_then(|l| l["likeStatus"].as_str()).or_else(|| m.values().find_map(find_like_status))
+        }
+        Value::Array(a) => a.iter().find_map(find_like_status),
+        _ => None,
+    }
+}
+
 pub async fn add_to_playlist(playlist_id: &str, video_id: &str) -> Result<(), String> {
     let r = post(
         "browse/edit_playlist",
@@ -299,5 +317,32 @@ mod live_tracking {
     async fn tracking_url_comes_back() {
         let url = super::player_tracking_url("dQw4w9WgXcQ").await.expect("tracking url");
         println!("RES tracking host ok: {}", super::is_trusted_youtube_url(&url));
+    }
+
+    /// What YouTube itself says a song's heart is (`LIKE` / `INDIFFERENT` / `DISLIKE`), read from the watch page.
+    async fn like_status(video_id: &str) -> String {
+        let v = super::post("next", serde_json::json!({"videoId": video_id})).await.expect("next answers");
+        super::find_like_status(&v).unwrap_or("not stated").to_owned()
+    }
+
+    /// Live, signed in: like a song that is not liked, see that YouTube now says so, and take the like back.
+    /// A song that is already liked is left alone.
+    #[tokio::test]
+    #[ignore]
+    async fn a_like_reaches_youtube_and_can_be_taken_back() {
+        let vid = std::env::var("YQT_LIKE_TEST_VIDEO").unwrap_or_else(|_| "lYBUbBu4W08".to_owned());
+        let before = like_status(&vid).await;
+        println!("RES before: {before}");
+        if before != "INDIFFERENT" {
+            println!("RES skipped: the song is not in the neutral state, so it is left as it is");
+            return;
+        }
+        println!("RES like: {:?}", super::rate(&vid, true).await);
+        let liked = like_status(&vid).await;
+        println!("RES after like: {liked}");
+        println!("RES unlike: {:?}", super::rate(&vid, false).await);
+        let after = like_status(&vid).await;
+        println!("RES after unlike: {after}");
+        assert_eq!((liked.as_str(), after.as_str()), ("LIKE", "INDIFFERENT"));
     }
 }

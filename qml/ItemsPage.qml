@@ -291,6 +291,9 @@ Kirigami.ScrollablePage {
             if (collection) {
                 // the whole list from the clicked row (counted by position: a song can be in a list twice), and the
                 // pages not loaded yet follow into the queue
+                // In order: a "Shuffle" pressed on some page earlier must not make the song after this one a random
+                // one. Shuffle is on only while the user asks for it (that button, or the toggle in the player bar).
+                Player.shuffle = false
                 startPlaying(songs(), items.slice(0, i).filter(x => x.kind === "song").length)
             } else {
                 Player.playSong(JSON.stringify(item))
@@ -521,7 +524,7 @@ Kirigami.ScrollablePage {
                         text: qsTr("Play")
                         icon.name: "media-playback-start"
                         enabled: page.songs().length > 0
-                        onClicked: page.startPlaying(page.songs(), 0)
+                        onClicked: { Player.shuffle = false; page.startPlaying(page.songs(), 0) }   // "Play" is in order
                     }
                     QQC2.Button {
                         text: qsTr("Shuffle")
@@ -625,7 +628,7 @@ Kirigami.ScrollablePage {
             required property string thumbnail
             required property string duration
 
-            readonly property bool liked: kind === "song" && Backend.loggedIn && (Backend.likedRev, Backend.isLiked(videoId))
+            readonly property bool liked: kind === "song" && Backend.loggedIn && Backend.likedRev >= 0 && Backend.isLiked(videoId)   // (the revision is *used*, so a change of it re-reads the heart)
 
             width: ListView.view.width
             highlighted: kind === "song" && Player.hasTrack && Player.videoId === videoId

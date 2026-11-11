@@ -71,6 +71,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn live_the_desktop_accepts_an_error_notification() {
-        super::linux::send("YQT test", "Error notifications work. This one was sent by a test.").await.expect("the notification service answers");
+        super::linux::send("YQT test", "Error notifications work. This one was sent by a test.")
+            .await
+            .expect("the notification service answers");
     }
 }

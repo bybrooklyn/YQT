@@ -16,7 +16,7 @@ QtObject {
     readonly property bool available: menuModel.available
 
     readonly property var win: applicationWindow()
-    readonly property bool liked: { Backend.likedRev; return Backend.loggedIn && Player.hasTrack && Backend.isLiked(Player.videoId) }
+    readonly property bool liked: Backend.likedRev >= 0 && Backend.loggedIn && Player.hasTrack && Backend.isLiked(Player.videoId)
 
     property TrayMenuModel menuModel: TrayMenuModel {
         onActivated: action => ctl.activate(action)

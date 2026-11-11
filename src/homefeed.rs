@@ -345,7 +345,11 @@ mod live {
             }
             let header_keys: Vec<&String> = list["header"].as_object().into_iter().flatten().map(|(k, _)| k).collect();
             let (items, next) = parse(&resp);
-            println!("RES page {page}: shelves {shelves:?}; cards {kinds:?}; read {} items; header {header_keys:?}; next {}", items.len(), next.is_some());
+            println!(
+                "RES page {page}: shelves {shelves:?}; cards {kinds:?}; read {} items; header {header_keys:?}; next {}",
+                items.len(),
+                next.is_some()
+            );
             let Some(token) = next else { break };
             resp = crate::ytapi::home_feed(Some((&token, &visitor))).await.expect("next page");
         }

@@ -945,7 +945,10 @@ mod play_album_tests {
         assert!(same_song(&json!({"videoId": "video1", "title": "x"}), &playing));
         assert!(same_song(&json!({"videoId": "track9", "title": "networking"}), &playing), "the album lists the track, Home had its video");
         assert!(!same_song(&json!({"videoId": "track9", "title": "Recollection"}), &playing));
-        assert!(!same_song(&json!({"videoId": "t", "title": ""}), &json!({"videoId": "v", "title": ""})), "two untitled rows are not the same song");
+        assert!(
+            !same_song(&json!({"videoId": "t", "title": ""}), &json!({"videoId": "v", "title": ""})),
+            "two untitled rows are not the same song"
+        );
     }
 
     /// A real album opens through the path "Play album" uses, and a song found by search is in its own album.
@@ -953,7 +956,13 @@ mod play_album_tests {
     #[ignore]
     async fn live_play_album_finds_the_song_in_its_album() {
         let found = crate::backend::search("daft punk get lucky".into(), "songs".into()).await.expect("search");
-        let song = found["items"].as_array().unwrap().iter().find(|i| !i["albumId"].as_str().unwrap_or("").is_empty()).expect("a song with an album").clone();
+        let song = found["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| !i["albumId"].as_str().unwrap_or("").is_empty())
+            .expect("a song with an album")
+            .clone();
         let album = song["albumId"].as_str().unwrap().to_owned();
         let tracks = album_songs(crate::backend::browse(format!("album:{album}")).await.ok());
         println!("album has {} songs; the song is at {:?}", tracks.len(), tracks.iter().position(|t| same_song(t, &song)));

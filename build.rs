@@ -11,6 +11,7 @@ fn main() {
         "qml/ItemsPage.qml",
         "qml/SearchBar.qml",
         "qml/NowPlayingBar.qml",
+        "qml/LikeButton.qml",
         "qml/NowPlayingPage.qml",
         "qml/AddToPlaylistDialog.qml",
         "qml/SettingsPage.qml",

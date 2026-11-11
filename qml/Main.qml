@@ -110,7 +110,10 @@ Kirigami.ApplicationWindow {
     // retries) all live in Rust (src/reporting.rs); this only says what is playing and how far along it is.
     Connections {
         target: Player
-        function onVideoIdChanged() { Reporter.trackChanged(Player.videoId) }
+        function onVideoIdChanged() {
+            Reporter.trackChanged(Player.videoId)
+            Backend.confirmLiked(Player.videoId)   // the heart of the playing song shows what YouTube has, not a guess
+        }
     }
     Timer {
         interval: 1000; repeat: true; running: Player.hasTrack
@@ -274,8 +277,8 @@ Kirigami.ApplicationWindow {
         componentName: "yqt",
         programLogo: "qrc:/yqt/logo.svg",
         shortDescription: qsTr("A tiny native YouTube Music client"),
-        homepage: "https://github.com/bybrooklyn/ytm-qt",
-        bugAddress: "https://github.com/bybrooklyn/ytm-qt/issues",
+        homepage: "https://github.com/bybrooklyn/YQT",
+        bugAddress: "https://github.com/bybrooklyn/YQT/issues",
         version: Qt.application.version,
         otherText: qsTr("Lyrics from LRCLIB, NetEase and YouTube Music. Not affiliated with YouTube or Google."),
         authors: [{name: "bybrooklyn", task: qsTr("Author"), emailAddress: "", webAddress: "https://github.com/bybrooklyn", ocsUsername: ""}],

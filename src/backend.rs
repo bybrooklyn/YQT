@@ -88,6 +88,10 @@ pub mod qobject {
         fn notify_error(self: &Backend, summary: &QString, body: &QString, window_active: bool) -> bool;
         #[qinvokable]
         fn is_liked(self: &Backend, video_id: &QString) -> bool;
+        /// Ask YouTube whether this song (the one that started playing) is liked and correct its heart: the liked
+        /// list is only read so far down (`liked_limit`), and a like made in another app is not in it at all.
+        #[qinvokable]
+        fn confirm_liked(self: Pin<&mut Backend>, video_id: &QString);
         #[qinvokable]
         fn set_liked(self: Pin<&mut Backend>, video_id: &QString, liked: bool) -> i32;
         #[qinvokable]
@@ -173,6 +177,32 @@ fn apply_like_choices(set: &mut HashSet<String>, choices: &HashMap<String, bool>
 /// has clicked again since (`choice` is then the newer click, which has its own request).
 fn like_needs_undo(choice: Option<bool>, refused: bool) -> bool {
     choice == Some(refused)
+}
+
+/// The list id of the real Liked-music page while one is open: every page read from it holds liked songs, however
+/// far down the list (`liked_limit` only bounds what is read in the background).
+static LIKED_PAGER: AtomicI32 = AtomicI32::new(0);
+
+/// Songs YouTube just listed as liked: remember them for the hearts, with the user's own clicks kept on top.
+fn remember_liked(ids: impl IntoIterator<Item = String>) {
+    liked_set(|s| {
+        s.extend(ids);
+        like_choices(|c| apply_like_choices(s, c));
+    });
+    LIKED_DIRTY.store(true, Ordering::Relaxed);
+}
+
+/// YouTube said whether one song is liked. Take its word unless the user clicked that heart in this run (`choice`).
+/// True when the heart has to be redrawn.
+fn settle_like(set: &mut HashSet<String>, choice: Option<bool>, video_id: &str, liked: bool) -> bool {
+    if choice.is_some() {
+        return false;
+    }
+    if liked {
+        set.insert(video_id.to_owned())
+    } else {
+        set.remove(video_id)
+    }
 }
 
 fn next_id(this: Pin<&mut qobject::Backend>) -> i32 {
@@ -263,7 +293,12 @@ where
             let waited = started.elapsed().saturating_sub(took);
             if took >= SLOW_REQUEST || waited >= SLOW_UI {
                 let what = std::any::type_name::<F>().trim_start_matches("yqt::").trim_end_matches("::{{closure}}");
-                tracing::info!("slow: {what} took {} ms, then waited {} ms for the UI thread (ok: {})", took.as_millis(), waited.as_millis(), r.is_ok());
+                tracing::info!(
+                    "slow: {what} took {} ms, then waited {} ms for the UI thread (ok: {})",
+                    took.as_millis(),
+                    waited.as_millis(),
+                    r.is_ok()
+                );
             }
             if LIKED_DIRTY.swap(false, Ordering::Relaxed) {
                 let rev = *b.liked_rev() + 1;
@@ -569,6 +604,9 @@ pub(crate) async fn more(key: i32) -> Res {
         return Err(err_for(auth, e)); // the pager knows whether its pages are fetched with the session
     }
     let items = clean_all(pager.items(from));
+    if key == LIKED_PAGER.load(Ordering::Relaxed) {
+        remember_liked(items.iter().filter_map(|i| i["videoId"].as_str()).filter(|id| !id.is_empty()).map(str::to_owned));
+    }
     let more = pager.has_more();
     if more {
         keep_pager(key, (pager, auth));
@@ -982,10 +1020,14 @@ pub(crate) async fn browse(target: String) -> Res {
                 // the hearts (the library fallback also lists songs that are not).
                 let (tracks, really_liked) = liked_tracks(&authed()).await.map_err(err_authed)?;
                 if really_liked {
-                    liked_set(|s| s.extend(tracks.items.iter().map(|t| t.id.clone())));
-                    LIKED_DIRTY.store(true, Ordering::Relaxed);
+                    remember_liked(tracks.items.iter().map(|t| t.id.clone()));
                 }
-                return Ok(paged("Liked music", "", "", Pager::Tracks(tracks, "".into(), "".into()), true));
+                let v = paged("Liked music", "", "", Pager::Tracks(tracks, "".into(), "".into()), true);
+                if really_liked {
+                    // the pages that follow (on scroll, or fed into the queue) are liked songs as well
+                    LIKED_PAGER.store(v["pager"].as_i64().unwrap_or(0) as i32, Ordering::Relaxed);
+                }
+                return Ok(v);
             }
             let id = id.trim_start_matches("VL");
             let p = match with_retry(|| q.music_playlist(id)).await {
@@ -1212,11 +1254,7 @@ async fn load_liked() {
     let _ = tracks.extend_limit(&aq, crate::config::current().library.liked_limit).await;
     // Merge instead of replacing: pages the user already browsed may hold songs beyond the limit.
     // (and a heart clicked while this list was being read stays as the user left it)
-    liked_set(|s| {
-        s.extend(tracks.items.iter().map(|t| t.id.clone()));
-        like_choices(|c| apply_like_choices(s, c));
-    });
-    LIKED_DIRTY.store(true, Ordering::Relaxed);
+    remember_liked(tracks.items.iter().map(|t| t.id.clone()));
     // The smart-download rule "keep liked songs" gets its input here (it does nothing unless smart downloads are on).
     if crate::config::current().downloads.smart_enabled {
         let items = tracks
@@ -1331,6 +1369,27 @@ impl qobject::Backend {
     fn is_liked(&self, video_id: &QString) -> bool {
         liked_set(|s| s.contains(&video_id.to_string()))
     }
+    fn confirm_liked(self: Pin<&mut Self>, video_id: &QString) {
+        let vid = video_id.to_string();
+        if vid.is_empty() || !is_logged_in() {
+            return;
+        }
+        let th = self.qt_thread();
+        st().rt.spawn(async move {
+            // (no answer, or a song YouTube states no heart for: what is shown stays)
+            let Ok(Some(liked)) = ytapi::like_status(&vid).await else { return };
+            let redraw = liked_set(|s| {
+                let choice = like_choices(|c| c.get(&vid).copied());
+                settle_like(s, choice, &vid, liked)
+            });
+            if redraw {
+                let _ = th.queue(|mut b| {
+                    let rev = *b.liked_rev() + 1;
+                    b.as_mut().set_liked_rev(rev);
+                });
+            }
+        });
+    }
     fn drop_pager(&self, pager: i32) {
         drop_pager(pager);
     }
@@ -1371,9 +1430,22 @@ impl qobject::Backend {
             if matches!(&sent, Err(e) if e == AUTH_MSG) && renew_session().await {
                 sent = ytapi::rate(&vid, liked).await;
             }
+            // The tick in the bar means "YouTube has it": an "ok" alone is not taken for that, the song is asked
+            // about again. (No answer to that question leaves the "ok" standing.)
+            if sent.is_ok() {
+                if let Ok(Some(now)) = ytapi::like_status(&vid).await {
+                    if now != liked {
+                        sent = Err("YouTube answered, but the song's like did not change. Try again in a moment.".to_owned());
+                    }
+                }
+            }
             match sent {
-                Ok(()) => Ok(json!({"liked": liked})),
+                Ok(()) => {
+                    tracing::info!("YouTube took the {} of {vid}", if liked { "like" } else { "unlike" });
+                    Ok(json!({"liked": liked}))
+                }
                 Err(message) => {
+                    tracing::warn!("YouTube did not take the {} of {vid}: {message}", if liked { "like" } else { "unlike" });
                     if !like_choices(|c| like_needs_undo(c.get(&vid).copied(), liked)) {
                         return Err(message); // clicked again since: that click decides what the heart shows
                     }
@@ -1612,6 +1684,18 @@ mod like_tests {
         assert!(like_needs_undo(Some(true), true));
         assert!(!like_needs_undo(Some(false), true), "unliked again since: the newer click stands");
         assert!(!like_needs_undo(None, true));
+    }
+
+    #[test]
+    fn youtubes_word_on_one_song_corrects_its_heart_but_never_a_click() {
+        let mut set: HashSet<String> = ["a"].into_iter().map(String::from).collect();
+        assert!(settle_like(&mut set, None, "b", true), "liked far down the list, or in another app: the heart fills");
+        assert!(set.contains("b"));
+        assert!(!settle_like(&mut set, None, "b", true), "already shown: nothing to redraw");
+        assert!(settle_like(&mut set, None, "a", false), "unliked elsewhere: the heart empties");
+        assert!(!set.contains("a"));
+        assert!(!settle_like(&mut set, Some(false), "b", false), "clicked in this run: the click's own request decides");
+        assert!(set.contains("b"));
     }
 }
 
