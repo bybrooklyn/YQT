@@ -52,8 +52,10 @@ screenshots:
     mkdir -p "$profile/config/yqt" docs/img
     # the Rust engine is the one that can run without a sound device (YTM_AUDIO_NULL); Qt Multimedia would be heard
     printf '[audio]\nengine = "rust"\n' > "$profile/config/yqt/config.toml"
+    # the desktop's colour scheme (dark here): the temporary config dir hides it, and the window palette needs the KDE theme
+    cp "${XDG_CONFIG_HOME:-$HOME/.config}/kdeglobals" "$profile/config/" 2>/dev/null || true
     XDG_DATA_HOME="$profile/data" XDG_CONFIG_HOME="$profile/config" XDG_CACHE_HOME="$profile/cache" \
-        YQT_MULTI_INSTANCE=1 YQT_HARNESS_LIVE=1 YTM_AUDIO_NULL=1 QT_ASSUME_STDERR_HAS_CONSOLE=1 \
+        YQT_MULTI_INSTANCE=1 YQT_HARNESS_LIVE=1 YTM_AUDIO_NULL=1 QT_ASSUME_STDERR_HAS_CONSOLE=1 QT_QPA_PLATFORMTHEME=KDE \
         timeout 180 gamescope --backend headless -W 1000 -H 720 -- \
         ./target/debug/yqt --qml "$PWD/tests/screenshots.qml" "$PWD/docs/img" 2>&1 | grep 'qml:' || true
 
