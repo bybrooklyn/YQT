@@ -2,11 +2,12 @@
 //! Offline downloads, modelled on YouTube Music's *Smart downloads*.
 //!
 //! * [`quality`] stream choice + file-name rules, [`rules`] the planner (pure), [`store`] the SQLite index,
-//!   [`manager`] the engine (queue, resume, retries, pause rules, smart loop).
+//!   [`manager`] the engine (queue, resume, retries, pause rules, smart loop), [`pending`] requests made during start-up.
 //! * [`local_source`] / [`local_playback_url`]: the playback hook. `player::resolve()` should prefer a local
 //!   file when there is one; the proxy serves it with `Range` support at `/t/<token>/dl/<id>`.
 //! * QML: the `Downloads` singleton (`src/downloadsqml.rs`), plus `DownloadButton.qml` and `DownloadsPage.qml`.
 pub mod manager;
+pub mod pending;
 pub mod quality;
 pub mod rules;
 pub mod store;

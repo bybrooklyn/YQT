@@ -3,9 +3,10 @@
 //! (It lives next to the other bridges in `src/` because cxx-qt-build wants all bridge files of one QML module
 //! in a single directory.)
 use crate::downloads::manager::{self, Event, Item};
+use crate::downloads::pending::{Pending, Request};
 use crate::downloads::{local_playback_url, rules};
 use core::pin::Pin;
-use cxx_qt::Threading;
+use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 
 #[cxx_qt::bridge]
@@ -101,6 +102,10 @@ pub struct DownloadsRust {
     pause_reason: QString,
     offline: bool,
     metered_note: QString,
+    /// Download / "Keep offline" requests made before start-up finished, replayed by [`qobject::Downloads::drain_pending`].
+    pending: Pending,
+    /// Start-up is done and `pending` was replayed: requests go straight to the manager.
+    started: bool,
 }
 
 impl Default for DownloadsRust {
@@ -113,6 +118,8 @@ impl Default for DownloadsRust {
             pause_reason: QString::default(),
             offline: !crate::connectivity::is_online(),
             metered_note: QString::default(),
+            pending: Pending::default(),
+            started: false,
         }
     }
 }
@@ -135,11 +142,13 @@ impl cxx_qt::Initialize for qobject::Downloads {
             let _ = th.queue(move |mut d| d.as_mut().set_offline(!online));
         });
         // Opening the index and reconciling with the disk must not stall the UI thread. Until it is done the
-        // getters below answer "nothing downloaded" instead of waiting; then the UI is told to look again.
+        // getters below answer "nothing downloaded" instead of waiting and requests wait in `pending`; then those are
+        // replayed and the UI is told to look again.
         let th = self.qt_thread();
         std::thread::spawn(move || {
             manager::init();
             let _ = th.queue(|mut d| {
+                d.as_mut().drain_pending();
                 d.as_mut().refresh_stats();
                 d.as_mut().changed(QString::default());
             });
@@ -165,18 +174,45 @@ impl qobject::Downloads {
         self.as_mut().set_metered_note(QString::from(manager::metered_note().unwrap_or("")));
     }
 
-    fn download(self: Pin<&mut Self>, item_json: &QString) {
-        for it in parse_items(item_json).into_iter().take(1) {
-            manager::enqueue(it);
+    /// Replay what was asked for during start-up, in order (on the Qt thread, once `manager::init` is done).
+    fn drain_pending(mut self: Pin<&mut Self>) {
+        let me = self.as_mut().rust_mut().get_mut();
+        me.started = true;
+        for req in me.pending.take() {
+            match req {
+                Request::Download(items) => manager::enqueue_all(items),
+                Request::KeepOffline { collection, items, on } => manager::keep_offline(&collection, &items, on),
+            }
         }
     }
 
-    fn download_all(self: Pin<&mut Self>, items_json: &QString) {
-        manager::enqueue_all(parse_items(items_json)); // one index write for the whole album / playlist
+    /// Until start-up is done the songs are noted instead of waiting for it here (that would freeze the window).
+    fn queue_download(mut self: Pin<&mut Self>, items: Vec<Item>) {
+        if self.rust().started {
+            manager::enqueue_all(items); // one index write for the whole album / playlist
+            return;
+        }
+        for id in self.as_mut().rust_mut().get_mut().pending.download(items) {
+            self.as_mut().changed(QString::from(&id));
+        }
     }
 
-    fn remove(self: Pin<&mut Self>, video_id: &QString) {
-        manager::remove(&video_id.to_string());
+    fn download(self: Pin<&mut Self>, item_json: &QString) {
+        self.queue_download(parse_items(item_json).into_iter().take(1).collect());
+    }
+
+    fn download_all(self: Pin<&mut Self>, items_json: &QString) {
+        self.queue_download(parse_items(items_json));
+    }
+
+    fn remove(mut self: Pin<&mut Self>, video_id: &QString) {
+        let id = video_id.to_string();
+        // a download only asked for during start-up is just forgotten (nothing of it exists yet)
+        if !self.rust().started && self.as_mut().rust_mut().get_mut().pending.cancel(&id) {
+            self.as_mut().changed(QString::from(&id));
+            return;
+        }
+        manager::remove(&id);
     }
 
     fn retry(self: Pin<&mut Self>, video_id: &QString) {
@@ -188,7 +224,14 @@ impl qobject::Downloads {
     }
 
     fn state(&self, video_id: &QString) -> QString {
-        QString::from(if manager::ready() { manager::state_of(&video_id.to_string()).0 } else { "none" })
+        let id = video_id.to_string();
+        QString::from(if self.rust().pending.is_queued(&id) {
+            "queued"
+        } else if manager::ready() {
+            manager::state_of(&id).0
+        } else {
+            "none"
+        })
     }
 
     fn percent(&self, video_id: &QString) -> i32 {
@@ -202,12 +245,25 @@ impl qobject::Downloads {
         manager::pin(&id.to_string(), on);
     }
 
-    fn keep_offline(self: Pin<&mut Self>, collection_id: &QString, items_json: &QString, on: bool) {
-        manager::keep_offline(&collection_id.to_string(), &parse_items(items_json), on);
+    fn keep_offline(mut self: Pin<&mut Self>, collection_id: &QString, items_json: &QString, on: bool) {
+        let items = parse_items(items_json);
+        if self.rust().started {
+            manager::keep_offline(&collection_id.to_string(), &items, on);
+            return;
+        }
+        let ids: Vec<String> = items.iter().map(|it| it.id.clone()).collect();
+        self.as_mut().rust_mut().get_mut().pending.keep_offline(&collection_id.to_string(), items, on);
+        for id in ids {
+            self.as_mut().changed(QString::from(&id));
+        }
     }
 
     fn is_kept_offline(&self, collection_id: &QString) -> bool {
-        manager::ready() && manager::is_kept_offline(&collection_id.to_string())
+        let collection = collection_id.to_string();
+        match self.rust().pending.kept_offline(&collection) {
+            Some(on) => on,
+            None => manager::ready() && manager::is_kept_offline(&collection),
+        }
     }
 
     fn pause_all(self: Pin<&mut Self>, on: bool) {

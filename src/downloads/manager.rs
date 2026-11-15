@@ -510,6 +510,9 @@ fn with_store<R>(f: impl FnOnce(&Store) -> R) -> Option<R> {
 
 static INIT: OnceLock<()> = OnceLock::new();
 static INIT_STARTED: AtomicBool = AtomicBool::new(false);
+/// The watcher has worked out once whether downloads are held back. Until then nothing is started: a request replayed
+/// right after start-up must not begin while offline, metered or on a low battery.
+static PAUSE_KNOWN: AtomicBool = AtomicBool::new(false);
 
 /// Has [`init`] finished? Until then the UI gets neutral answers instead of waiting for it on the Qt thread.
 pub fn ready() -> bool {
@@ -591,6 +594,7 @@ async fn refresh_pause(metered: Arc<dyn Metered>, battery: Arc<dyn BatteryProbe>
         c
     };
     mgr().paused_flag.store(reason.is_some(), Ordering::Relaxed);
+    PAUSE_KNOWN.store(true, Ordering::Relaxed);
     if changed {
         emit(Event::Stats);
         if reason.is_none() {
@@ -899,7 +903,7 @@ fn kick() {
     loop {
         let next = {
             let mut i = mgr().inner.lock().unwrap();
-            if is_paused() || i.active >= max {
+            if !PAUSE_KNOWN.load(Ordering::Relaxed) || is_paused() || i.active >= max {
                 return;
             }
             let mut found = None;
