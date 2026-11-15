@@ -242,11 +242,8 @@ mod sni {
 
             let (tx, mut rx) = unbounded_channel();
             let host = zbus::connection::Builder::session()
-                .unwrap()
                 .name("org.kde.StatusNotifierWatcher")
-                .unwrap()
                 .serve_at("/StatusNotifierWatcher", Watcher(tx))
-                .unwrap()
                 .build()
                 .await
                 .expect("the fake tray host");
@@ -276,7 +273,7 @@ mod sni {
 
             // Clicking "Next" (item 3: Pause, Previous, Next, ...) and then "Quit" (item 9) reaches the app as actions.
             for id in [3i32, 9] {
-                menu.call_method("Event", &(id, "clicked", zbus::zvariant::Value::from(0i32), 0u32)).await.unwrap();
+                menu.call_method("Event", &(id, "clicked", zbus::Variant::from(0i32), 0u32)).await.unwrap();
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert_eq!(*clicked.lock().unwrap(), vec![Action::Next, Action::Quit]);

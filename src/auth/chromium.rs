@@ -180,14 +180,14 @@ impl Key {
                 cbc::Decryptor::<aes::Aes128>::new(key.into(), (&[b' '; 16]).into()).decrypt_padded_vec::<Pkcs7>(body).ok()
             }
             Key::Gcm(key) => {
-                use aes_gcm::aead::{generic_array::GenericArray, Aead};
+                use aes_gcm::aead::Aead;
                 use aes_gcm::{Aes256Gcm, KeyInit};
                 // nonce (12) | ciphertext | tag (16)
                 if body.len() < 12 + 16 {
                     return None;
                 }
                 let (nonce, ct) = body.split_at(12);
-                Aes256Gcm::new(GenericArray::from_slice(key)).decrypt(GenericArray::from_slice(nonce), ct).ok()
+                Aes256Gcm::new_from_slice(key).ok()?.decrypt(nonce.try_into().ok()?, ct).ok()
             }
         }
     }
@@ -439,10 +439,10 @@ mod tests {
     }
 
     fn enc_gcm(key: &[u8; 32], plain: &[u8]) -> Vec<u8> {
-        use aes_gcm::aead::{generic_array::GenericArray, Aead};
+        use aes_gcm::aead::Aead;
         use aes_gcm::{Aes256Gcm, KeyInit};
         let nonce = [7u8; 12];
-        let ct = Aes256Gcm::new(GenericArray::from_slice(key)).encrypt(GenericArray::from_slice(&nonce), plain).unwrap();
+        let ct = Aes256Gcm::new_from_slice(key).unwrap().encrypt((&nonce).into(), plain).unwrap();
         [b"v10".as_slice(), &nonce, &ct].concat()
     }
 

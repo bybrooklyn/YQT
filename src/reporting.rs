@@ -16,7 +16,7 @@ use crate::config;
 use core::pin::Pin;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::time::Duration;
 
 #[cxx_qt::bridge]

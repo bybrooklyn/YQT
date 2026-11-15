@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
-use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Value};
+use zbus::{ObjectPath, OwnedObjectPath, OwnedVariant as OwnedValue, Variant as Value};
 use zbus::{Connection, Proxy};
 
 /// Ask at most this long: the wallet may be waiting for the user to click "allow" / type a passphrase.

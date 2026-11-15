@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+use rand::RngExt;
 use crate::items::track;
 use crate::models::queue::{pick_other, QueueState};
 use crate::models::Change;
@@ -8,7 +9,6 @@ use crate::state::st;
 use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
-use rand::Rng;
 use rustypipe::param::StreamFilter;
 use serde_json::Value;
 use std::collections::HashMap;

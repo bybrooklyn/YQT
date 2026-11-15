@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::{ObjectPath, OwnedValue, Value};
+use zbus::{ObjectPath, OwnedVariant as OwnedValue, Variant as Value};
 
 const PATH: &str = "/org/mpris/MediaPlayer2";
 
@@ -251,7 +251,7 @@ pub fn start(forward: impl Fn(&str, i64) + Send + Sync + 'static) {
         return; // already running
     }
     st().rt.spawn(async {
-        let built = zbus::connection::Builder::session().and_then(|b| b.serve_at(PATH, Root)).and_then(|b| b.serve_at(PATH, PlayerIface));
+        let built = Ok::<_, zbus::Error>(zbus::connection::Builder::session().serve_at(PATH, Root).serve_at(PATH, PlayerIface));
         match built {
             Ok(b) => match b.build().await {
                 Ok(c) => {
@@ -291,13 +291,13 @@ async fn keep_name(conn: zbus::Connection) {
     let mut held = String::new();
     loop {
         let primary = match zbus::names::WellKnownName::try_from(NAME) {
-            Ok(n) => owns(bus.request_name(n, RequestNameFlags::DoNotQueue.into()).await),
+            Ok(n) => owns(bus.request_name(n, RequestNameFlags::DO_NOT_QUEUE).await),
             Err(_) => false,
         };
         let want = name_to_hold(primary, pid);
         let have = primary
             || match zbus::names::WellKnownName::try_from(want.as_str()) {
-                Ok(n) => owns(bus.request_name(n, RequestNameFlags::DoNotQueue.into()).await),
+                Ok(n) => owns(bus.request_name(n, RequestNameFlags::DO_NOT_QUEUE).await),
                 Err(_) => false,
             };
         let now = if have { want } else { String::new() };

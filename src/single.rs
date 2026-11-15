@@ -52,18 +52,18 @@ struct App;
 
 #[zbus::interface(name = "org.freedesktop.Application")]
 impl App {
-    fn activate(&self, _platform_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue>) {
+    fn activate(&self, _platform_data: std::collections::HashMap<String, zbus::OwnedVariant>) {
         activate();
     }
     /// Nothing to open (the app takes no files), so this shows the window like `Activate`.
-    fn open(&self, _uris: Vec<String>, _platform_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue>) {
+    fn open(&self, _uris: Vec<String>, _platform_data: std::collections::HashMap<String, zbus::OwnedVariant>) {
         activate();
     }
     fn activate_action(
         &self,
         _name: String,
-        _parameter: Vec<zbus::zvariant::OwnedValue>,
-        _platform_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        _parameter: Vec<zbus::OwnedVariant>,
+        _platform_data: std::collections::HashMap<String, zbus::OwnedVariant>,
     ) {
         activate();
     }
@@ -91,16 +91,16 @@ pub fn claim() -> Claim {
 
 async fn try_claim() -> zbus::Result<Claim> {
     use zbus::fdo::{DBusProxy, RequestNameFlags, RequestNameReply};
-    let conn = zbus::connection::Builder::session()?.serve_at(PATH, App)?.build().await?;
+    let conn = zbus::connection::Builder::session().serve_at(PATH, App).build().await?;
     let bus = DBusProxy::new(&conn).await?;
     let name = zbus::names::WellKnownName::try_from(NAME)?;
-    match bus.request_name(name, RequestNameFlags::DoNotQueue.into()).await? {
+    match bus.request_name(name, RequestNameFlags::DO_NOT_QUEUE).await? {
         RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner => {
             let _ = CONN.set(conn);
             Ok(Claim::First)
         }
         _ => {
-            let no_data: std::collections::HashMap<String, zbus::zvariant::OwnedValue> = Default::default();
+            let no_data: std::collections::HashMap<String, zbus::OwnedVariant> = Default::default();
             conn.call_method(Some(NAME), PATH, Some("org.freedesktop.Application"), "Activate", &(no_data,)).await?;
             Ok(Claim::AlreadyRunning)
         }

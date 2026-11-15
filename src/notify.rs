@@ -30,7 +30,7 @@ pub fn error(summary: &str, body: &str) {
 mod linux {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zbus::zvariant::Value;
+    use zbus::Variant as Value;
 
     /// The notification shown last: the next error replaces it instead of piling up beside it.
     static LAST: AtomicU32 = AtomicU32::new(0);

@@ -24,18 +24,18 @@ rquickjs = "0.9"
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "charset", "json", "gzip", "brotli"] }
 plist = "1"
-rand = "0.9"
-rusqlite = { version = "0.41.1", features = ["bundled"] }
+rand = "0.10"
+rusqlite = { version = "0.43", features = ["bundled"] }
 sha1 = "0.11.0"
 aes = "0.9.4"
 cbc = "0.2.1"
 cipher = { version = "0.5", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
+toml = "1"
 toml_edit = "0.25"
-dirs = "6"
-aes-gcm = "0.10"
-base64 = "0.22"
+dirs = "7"
+aes-gcm = "0.11"
+base64 = "0.23"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 fs4 = "1.1.0"
 # Pure-Rust audio engine (no FFmpeg, no Qt Multimedia)
@@ -54,7 +54,7 @@ harness = []
 
 # Linux-only: MPRIS and the system tray (StatusNotifierItem) over D-Bus, both pure Rust
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5", default-features = false, features = ["tokio"] }
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 
 # Windows-only: DPAPI to unwrap the browser cookie key

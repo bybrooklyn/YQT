@@ -15,7 +15,7 @@
 //! * upstream URLs are never logged.
 use crate::config;
 use crate::state::st;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
