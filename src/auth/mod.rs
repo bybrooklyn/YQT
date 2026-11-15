@@ -100,9 +100,57 @@ fn finish_header(parts: Vec<String>) -> Result<String, String> {
 
 /// The stored Cookie header (read from RustyPipe's cache) – needed for the write calls in ytapi.
 pub fn stored_cookie() -> Option<String> {
-    let text = std::fs::read_to_string(data_dir().join("rustypipe_cache.json")).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    v["auth_cookie"]["cookie"].as_str().map(str::to_owned)
+    rustypipe_cache()?["auth_cookie"]["cookie"].as_str().map(str::to_owned)
+}
+
+/// How long to wait before each new look at a cache file caught mid-write. Short: the UI thread asks too (`finish`).
+const CACHE_RETRY: [std::time::Duration; 2] = [std::time::Duration::from_millis(10), std::time::Duration::from_millis(40)];
+/// A cache file still unreadable after the retries stands in with its last good contents for this long.
+const CACHE_LAST_GOOD_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// RustyPipe's cache file (`rustypipe_cache.json`), parsed. `None` when there is none.
+///
+/// RustyPipe rewrites it in place (truncate, then write), so a read can land on an empty or half-written file. That
+/// is not "signed out": the file is read again after a moment, and failing that the last good read is used if it is
+/// recent. Several threads read it, so this never assumes it is the only one.
+pub fn rustypipe_cache() -> Option<serde_json::Value> {
+    static LAST_GOOD: std::sync::Mutex<Option<(std::time::Instant, serde_json::Value)>> = std::sync::Mutex::new(None);
+    let path = data_dir().join("rustypipe_cache.json");
+    match read_settled(|| std::fs::read_to_string(&path), std::thread::sleep) {
+        Read::Parsed(v) => {
+            *LAST_GOOD.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+            Some(v)
+        }
+        Read::Missing => None,
+        Read::Torn => {
+            let last = LAST_GOOD.lock().unwrap();
+            last.as_ref().filter(|(at, _)| at.elapsed() < CACHE_LAST_GOOD_FOR).map(|(_, v)| v.clone())
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Read {
+    Parsed(serde_json::Value),
+    /// No file (or no access to it): really nothing stored.
+    Missing,
+    /// Empty or not JSON on every look: caught mid-write, most likely.
+    Torn,
+}
+
+/// Read and parse a file another process rewrites in place, looking again after each of `CACHE_RETRY` while it is
+/// empty or does not parse.
+fn read_settled(mut read: impl FnMut() -> std::io::Result<String>, mut wait: impl FnMut(std::time::Duration)) -> Read {
+    for attempt in 0..=CACHE_RETRY.len() {
+        if attempt > 0 {
+            wait(CACHE_RETRY[attempt - 1]);
+        }
+        let Ok(text) = read() else { return Read::Missing };
+        if let Ok(v) = serde_json::from_str(&text) {
+            return Read::Parsed(v);
+        }
+    }
+    Read::Torn
 }
 
 /// A browser we know how to import a YouTube session from.
@@ -245,6 +293,23 @@ pub fn import_from_browser(id: &str) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cache_file_caught_mid_write_is_read_again() {
+        let mut reads = ["", "{\"auth_cookie\":", "{\"auth_cookie\":{\"cookie\":\"SAPISID=x\"}}"].into_iter();
+        let mut waited = Vec::new();
+        let got = read_settled(|| Ok(reads.next().unwrap().to_owned()), |d| waited.push(d));
+        assert_eq!(got, Read::Parsed(serde_json::json!({"auth_cookie": {"cookie": "SAPISID=x"}})));
+        assert_eq!(waited, CACHE_RETRY, "empty, then half-written, then whole");
+
+        let mut waited = 0;
+        assert_eq!(read_settled(|| Ok("{}".to_owned()), |_| waited += 1), Read::Parsed(serde_json::json!({})));
+        assert_eq!(waited, 0, "a whole file is taken at once");
+
+        assert_eq!(read_settled(|| Ok(String::new()), |_| {}), Read::Torn, "never settles: not taken for 'signed out'");
+        let missing = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(read_settled(missing, |_| panic!("nothing to wait for")), Read::Missing);
+    }
 
     #[test]
     fn only_plain_browser_ids_are_remembered() {

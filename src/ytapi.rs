@@ -20,9 +20,7 @@ const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/201001
 /// The WEB_REMIX client version to claim. YouTube rejects requests from long-outdated clients, and RustyPipe keeps
 /// a fresh one in its cache (`clients.desktop_music.data.version`), so prefer that over the (slowly rotting) config default.
 pub fn client_version() -> String {
-    std::fs::read_to_string(crate::state::data_dir().join("rustypipe_cache.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    crate::auth::rustypipe_cache()
         .and_then(|v| parse_client_version(&v))
         .unwrap_or_else(|| crate::config::get().youtube.web_remix_client_version.clone())
 }
