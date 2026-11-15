@@ -219,6 +219,75 @@ fn forget_liked() {
     LIKED_DIRTY.store(true, Ordering::Relaxed);
 }
 
+/// Likes on their way to YouTube, per song (two clicks on one heart can both be).
+static LIKES_IN_FLIGHT: Mutex<Option<HashMap<String, u32>>> = Mutex::new(None);
+
+fn likes_in_flight<R>(f: impl FnOnce(&mut HashMap<String, u32>) -> R) -> R {
+    f(LIKES_IN_FLIGHT.lock().unwrap().get_or_insert_default())
+}
+
+/// A like on its way to YouTube, for as long as its request runs: a renewal's clean slate keeps its click
+/// (`forget_liked_but_in_flight`), or a refusal would have nothing to undo the heart by.
+struct LikeInFlight(String);
+
+impl LikeInFlight {
+    fn new(video_id: &str) -> Self {
+        likes_in_flight(|m| *m.entry(video_id.to_owned()).or_default() += 1);
+        Self(video_id.to_owned())
+    }
+}
+
+impl Drop for LikeInFlight {
+    fn drop(&mut self) {
+        likes_in_flight(|m| {
+            if let Some(n) = m.get_mut(&self.0) {
+                *n -= 1;
+                if *n == 0 {
+                    m.remove(&self.0);
+                }
+            }
+        });
+    }
+}
+
+/// Start the hearts over, keeping only the clicks whose likes are still on their way (`in_flight`), and their hearts.
+fn keep_in_flight(set: &mut HashSet<String>, choices: &mut HashMap<String, bool>, in_flight: &HashMap<String, u32>) {
+    set.clear();
+    choices.retain(|id, _| in_flight.contains_key(id));
+    apply_like_choices(set, choices);
+}
+
+/// `forget_liked` for a renewal: the account may have changed with it, but a like that is on its way keeps its click
+/// and heart, so that a refusal still puts the heart back (`like_needs_undo`). Pages cached with the old cookies, and
+/// a liked list being read with them, are another session's from now on (`LOGIN_EPOCH`).
+fn forget_liked_but_in_flight() {
+    LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+    // (in-flight list held throughout: a like that starts meanwhile is either kept or clicked after the clear)
+    likes_in_flight(|m| liked_set(|s| like_choices(|c| keep_in_flight(s, c, m))));
+    LIKED_DIRTY.store(true, Ordering::Relaxed);
+}
+
+/// Read the liked list again after a renewal made outside the session check (which reads it itself), and redraw the
+/// hearts.
+fn reload_liked() {
+    st().rt.spawn(async {
+        let started = sign_outs();
+        load_liked().await;
+        if signed_out_since(started, sign_outs()) {
+            return;
+        }
+        let th = BACKEND.lock().unwrap().clone();
+        if let Some(th) = th {
+            let _ = th.queue(|mut b| {
+                if LIKED_DIRTY.swap(false, Ordering::Relaxed) {
+                    let rev = *b.liked_rev() + 1;
+                    b.as_mut().set_liked_rev(rev);
+                }
+            });
+        }
+    });
+}
+
 /// YouTube said whether one song is liked. Take its word unless the user clicked that heart in this run (`choice`).
 /// True when the heart has to be redrawn.
 fn settle_like(set: &mut HashSet<String>, choice: Option<bool>, video_id: &str, liked: bool) -> bool {
@@ -1138,12 +1207,16 @@ async fn login_cookie(text: String) -> Res {
 }
 
 /// Take the browser's current cookies again, if the sign-in came from a browser. For a caller outside the request
-/// plumbing (the player) whose signed-in call was refused; the signed-in state itself is left to `verify_session`.
+/// plumbing (the player, a like) whose signed-in call was refused; the signed-in state itself is left to
+/// `verify_session`. The browser may be signed in to another account by now: the hearts start over (keeping the
+/// likes still on their way, the caller's among them) and the liked list is read again.
 pub(crate) async fn renew_session() -> bool {
     match auth::remembered_browser() {
         Some(browser) => match login_import(browser.clone()).await {
             Ok(_) => {
-                tracing::info!("renewed the sign-in from {browser} for playback");
+                tracing::info!("renewed the sign-in from {browser}");
+                forget_liked_but_in_flight();
+                reload_liked();
                 true
             }
             Err(e) => {
@@ -1359,8 +1432,7 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
                 if outcome == Session::Renewed {
                     // pages cached while the old cookies were refused must not be shown as this session's, and the
                     // browser may have been signed in to another account since: its likes are read again below
-                    forget_liked();
-                    LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+                    forget_liked_but_in_flight();
                 }
                 set_logged(ok);
             }
@@ -1597,11 +1669,13 @@ impl qobject::Backend {
         let vid = video_id.to_string();
         let th = self.qt_thread();
         // Optimistic: the heart flips immediately; if YouTube refuses, it flips back and `like_failed` says why.
+        let in_flight = LikeInFlight::new(&vid);
         liked_set(|s| if liked { s.insert(vid.clone()) } else { s.remove(&vid) });
         like_choices(|c| c.insert(vid.clone(), liked));
         let rev = *self.liked_rev() + 1;
         self.as_mut().set_liked_rev(rev);
         spawn(self, async move {
+            let _in_flight = in_flight; // (until the undo below is decided)
             let _turn = LIKE_ORDER.lock().await;
             let mut sent = ytapi::rate(&vid, liked).await;
             // A session YouTube stopped accepting is renewed and the like sent again, instead of the heart quietly
@@ -1875,6 +1949,32 @@ mod like_tests {
         remember_liked(["c".to_owned()]);
         assert_eq!(liked_set(|s| s.clone()), HashSet::from(["c".to_owned()]));
         forget_liked();
+    }
+
+    #[test]
+    fn a_renewal_starts_the_hearts_over_but_a_like_on_its_way_can_still_be_undone() {
+        let mut set: HashSet<String> = ["old", "sent"].into_iter().map(String::from).collect();
+        let mut choices: HashMap<String, bool> =
+            [("sent".to_owned(), true), ("done".to_owned(), true), ("unsent".to_owned(), false)].into_iter().collect();
+        let in_flight: HashMap<String, u32> = [("sent".to_owned(), 1), ("unsent".to_owned(), 2)].into_iter().collect();
+        keep_in_flight(&mut set, &mut choices, &in_flight);
+        assert_eq!(set, HashSet::from(["sent".to_owned()]), "the old account's hearts go, the pending like's stays");
+        assert_eq!(choices.get("sent"), Some(&true));
+        assert_eq!(choices.get("unsent"), Some(&false));
+        assert!(!choices.contains_key("done"), "a settled click goes with the old account");
+        assert!(like_needs_undo(choices.get("sent").copied(), true), "a refusal still puts the heart back");
+    }
+
+    #[test]
+    fn a_like_counts_as_on_its_way_until_its_request_is_over() {
+        let id = "in-flight-test-song"; // (the map is shared with the app's other tests)
+        let first = LikeInFlight::new(id);
+        let second = LikeInFlight::new(id); // clicked again before the first was answered
+        assert_eq!(likes_in_flight(|m| m.get(id).copied()), Some(2));
+        drop(first);
+        assert_eq!(likes_in_flight(|m| m.get(id).copied()), Some(1));
+        drop(second);
+        assert!(likes_in_flight(|m| !m.contains_key(id)));
     }
 
     #[test]
