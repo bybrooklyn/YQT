@@ -144,6 +144,24 @@ pub(crate) fn is_logged_in() -> bool {
 pub(crate) fn login_epoch() -> u32 {
     LOGIN_EPOCH.load(Ordering::Relaxed)
 }
+
+/// Counts sign-outs. A session check or renewal that started before one is stale: it must neither publish its answer
+/// nor store cookies, or the user is signed back in behind their back. (Not `LOGIN_EPOCH`: that one also moves on
+/// sign-ins and renewals, which a running check must survive.) Locked while it is compared and acted on, so a
+/// sign-out cannot slip in between.
+static SIGN_OUTS: Mutex<u32> = Mutex::new(0);
+/// Held while cookies are stored or removed: a renewal that read the remembered browser before a sign-out and a
+/// sign-out's removal of the cookies cannot interleave.
+static SESSION_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn sign_outs() -> u32 {
+    *SIGN_OUTS.lock().unwrap()
+}
+
+/// Was there a sign-out since `started` (a `sign_outs()` taken then)?
+fn signed_out_since(started: u32, now: u32) -> bool {
+    started != now
+}
 static LIKED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static LIKED_DIRTY: AtomicBool = AtomicBool::new(false);
 
@@ -1079,14 +1097,25 @@ async fn set_cookie(input: Input) -> Result<(), String> {
 }
 
 async fn login_import(id: String) -> Res {
+    import_session(id, sign_outs()).await
+}
+
+/// Take a browser's cookies, unless the user signed out after `started` (a `sign_outs()`): reading the browser
+/// takes a while, and a renewal that began before a sign-out must not undo it.
+async fn import_session(id: String, started: u32) -> Res {
     let from = id.clone();
     let (browser, header) = tokio::task::spawn_blocking(move || auth::import_from_browser(&id)).await.map_err(|e| e.to_string())??;
+    let _writing = SESSION_WRITE.lock().await;
+    if signed_out_since(started, sign_outs()) {
+        return Err("Signed out in the meantime".to_owned());
+    }
     set_cookie(Input::Header(header)).await?;
     auth::remember_browser(Some(&from)); // an expired session is renewed from here (see `refresh_login`)
     Ok(json!({"browser": browser}))
 }
 
 async fn login_cookie(text: String) -> Res {
+    let _writing = SESSION_WRITE.lock().await;
     set_cookie(auth::parse_input(&text)?).await?;
     auth::remember_browser(None); // pasted cookies can't be renewed
     Ok(json!({"browser": "pasted cookies"}))
@@ -1183,6 +1212,7 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
         *last = Some(now);
     }
     st().rt.spawn(async move {
+        let started = sign_outs();
         let had_cookie = auth::stored_cookie().is_some();
         let check = match st().rp.user_auth_check_cookie().await {
             Ok(()) => Check::Accepted,
@@ -1195,7 +1225,7 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
         let mut renewed = false;
         if check == Check::Refused && had_cookie {
             match auth::remembered_browser() {
-                Some(browser) => match login_import(browser.clone()).await {
+                Some(browser) => match import_session(browser.clone(), started).await {
                     Ok(_) => {
                         tracing::info!("the stored sign-in had expired; renewed it from {browser}");
                         renewed = true;
@@ -1208,17 +1238,31 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
         }
         let outcome = session_after(check, had_cookie, || renewed);
         let ok = outcome != Session::Dead;
-        if outcome == Session::Renewed {
-            // pages cached while the old cookies were refused must not be shown as this session's
-            LIKED_DIRTY.store(true, Ordering::Relaxed);
-            LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+        {
+            let now = SIGN_OUTS.lock().unwrap();
+            if signed_out_since(started, *now) {
+                // the user signed out while this ran: the answer is about a session that is gone on purpose
+                VERIFYING.store(false, Ordering::Relaxed);
+                REFUSED_WAITING.store(false, Ordering::Relaxed);
+                tracing::info!("signed out during the sign-in check; its answer is dropped");
+                return;
+            }
+            if outcome == Session::Renewed {
+                // pages cached while the old cookies were refused must not be shown as this session's
+                LIKED_DIRTY.store(true, Ordering::Relaxed);
+                LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+            }
+            set_logged(ok);
         }
-        set_logged(ok);
         VERIFYING.store(false, Ordering::Relaxed);
         // Publish the sign-in state FIRST; the liked-songs preload below is slow and must never gate it.
         let th_liked = th.clone();
         let expired = !ok && had_cookie;
         let _ = th.queue(move |mut b| {
+            // (`logout` runs on this thread too: a sign-out queued ahead of this has already said "signed out")
+            if signed_out_since(started, sign_outs()) {
+                return;
+            }
             b.as_mut().set_logged_in(ok);
             // (read here, on the Qt thread, where `finish` sets it: a request refused a moment ago is not missed)
             let waiting = REFUSED_WAITING.swap(false, Ordering::Relaxed);
@@ -1233,6 +1277,9 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
         });
         if ok && (forced || outcome == Session::Renewed) {
             load_liked().await;
+            if signed_out_since(started, sign_outs()) {
+                return;
+            }
             let _ = th_liked.queue(|mut b| {
                 if LIKED_DIRTY.swap(false, Ordering::Relaxed) {
                     let rev = *b.liked_rev() + 1;
@@ -1336,10 +1383,18 @@ impl qobject::Backend {
     }
     fn logout(self: Pin<&mut Self>) {
         let th = self.qt_thread();
-        set_logged(false);
+        {
+            // a session check already running sees this and drops its answer (see `SIGN_OUTS`)
+            let mut n = SIGN_OUTS.lock().unwrap();
+            *n = n.wrapping_add(1);
+            set_logged(false);
+        }
         liked_set(|s| s.clear());
         auth::remember_browser(None); // signed out on purpose: don't sign back in at the next start
         st().rt.spawn(async move {
+            let _writing = SESSION_WRITE.lock().await;
+            // again, now that no renewal is mid-write: one that got past its check first has just stored its browser
+            auth::remember_browser(None);
             let _ = st().rp.user_auth_remove_cookie().await;
             let _ = st().rp.user_auth_logout().await; // also drops any OAuth token left by older versions
             let _ = th.queue(|mut b| {
@@ -1721,6 +1776,19 @@ mod session_check_tests {
         assert!(!may_verify(Some(t0), t0 + Duration::from_secs(1), false));
         assert!(may_verify(Some(t0), t0 + VERIFY_EVERY, false));
         assert!(may_verify(Some(t0), t0 + Duration::from_secs(1), true), "the start of the app and Settings always ask");
+    }
+
+    #[test]
+    fn a_check_that_started_before_a_sign_out_is_stale() {
+        let started = sign_outs();
+        assert!(!signed_out_since(started, sign_outs()), "nothing happened: the check's answer stands");
+        {
+            let mut n = SIGN_OUTS.lock().unwrap(); // as `logout` does
+            *n = n.wrapping_add(1);
+        }
+        assert!(signed_out_since(started, sign_outs()), "signed out meanwhile: no publishing, no importing");
+        assert!(!signed_out_since(sign_outs(), sign_outs()), "a check started after the sign-out is current");
+        assert!(signed_out_since(u32::MAX, 0), "the count wraps without a false 'current'");
     }
 }
 
