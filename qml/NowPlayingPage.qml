@@ -32,7 +32,8 @@ Kirigami.Page {
 
     function seconds() {
         const p = Player.duration.split(":").map(Number)
-        return p.length === 2 && !isNaN(p[0]) && !isNaN(p[1]) ? p[0] * 60 + p[1] : 0
+        if (p.length < 2 || p.length > 3 || p.some(isNaN)) return 0
+        return p.reduce((total, part) => total * 60 + part, 0) // m:ss or h:mm:ss
     }
     function fetchLyrics() {
         if (!Player.hasTrack || lyricsFor === Player.videoId) return

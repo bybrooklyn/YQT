@@ -56,6 +56,14 @@ Kirigami.ScrollablePage {
     Connections {
         target: Downloads
         function onChanged(id) { reloadTimer.restart() }
+        function onProgress(id, percent, speed) {
+            for (let i = 0; i < rowModel.count; ++i) {
+                if (rowModel.get(i).videoId !== id) continue
+                rowModel.setProperty(i, "percent", percent)
+                rowModel.setProperty(i, "speed", speed)
+                break
+            }
+        }
     }
     // progress ticks only update the rows that are visible; a list reload is for state changes
     Timer { id: reloadTimer; interval: 150; onTriggered: page.reload() }
