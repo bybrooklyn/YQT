@@ -130,12 +130,12 @@ async fn fetch_text(url: &str, max: usize) -> Result<String, String> {
 /// The current player script: (id, source). The id is asked for at most every [`PLAYER_TTL`]; the source comes from
 /// disk when this id was fetched before.
 async fn player_script() -> Result<(String, String), String> {
-    let known = CURRENT_PLAYER.lock().unwrap().as_ref().filter(|(_, at)| at.elapsed() < PLAYER_TTL).map(|(id, _)| id.clone());
-    let id = match known {
-        Some(id) => id,
+    let known = CURRENT_PLAYER.lock().unwrap().clone().filter(|(_, at)| at.elapsed() < PLAYER_TTL);
+    let (id, asked_at) = match known {
+        Some((id, at)) => (id, at),
         None => {
             let page = fetch_text("https://www.youtube.com/iframe_api", 512 * 1024).await.map_err(|e| format!("player script: {e}"))?;
-            extract_player_id(&page).ok_or("player script: YouTube's embed page names no player")?
+            (extract_player_id(&page).ok_or("player script: YouTube's embed page names no player")?, Instant::now())
         }
     };
     debug_assert!(is_player_id(&id));
@@ -156,7 +156,8 @@ async fn player_script() -> Result<(String, String), String> {
             s
         }
     };
-    *CURRENT_PLAYER.lock().unwrap() = Some((id.clone(), Instant::now()));
+    // keep the time the id was asked for: refreshing it on every use would let the TTL slide forever
+    *CURRENT_PLAYER.lock().unwrap() = Some((id.clone(), asked_at));
     Ok((id, script))
 }
 
