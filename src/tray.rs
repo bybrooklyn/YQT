@@ -117,9 +117,12 @@ mod sni {
     use super::{Action, MenuEntry};
     use ksni::menu::{CheckmarkItem, MenuItem, StandardItem};
     use std::sync::Arc;
+    use std::time::Duration;
 
     /// Called (on the tray's D-Bus task) when the user picks something; the model forwards it to the Qt thread.
     pub type OnAction = Arc<dyn Fn(Action) + Send + Sync>;
+    /// Called when the desktop's tray host (the StatusNotifierWatcher) goes away (`false`) or comes back (`true`).
+    pub type OnWatcher = Arc<dyn Fn(bool) + Send + Sync>;
 
     pub struct SniTray {
         pub entries: Vec<MenuEntry>,
@@ -127,12 +130,43 @@ mod sni {
         /// Which push the menu and tooltip came from (0: the ones the tray was built with).
         seq: u64,
         on_action: OnAction,
+        on_watcher: Option<OnWatcher>,
         icons: Vec<ksni::Icon>,
+    }
+
+    /// Keep trying to register for about this long when there is no tray host yet: at login, or when a KDE session
+    /// is restored, the app can start before plasmashell has put up its StatusNotifierWatcher.
+    pub const START_RETRY_FOR: Duration = Duration::from_secs(180);
+    const START_RETRY_FIRST: Duration = Duration::from_secs(1);
+    const START_RETRY_MAX: Duration = Duration::from_secs(15);
+
+    /// Register a tray built by `make`, retrying with a growing pause (1 s, 2 s, 4 s, … at most 15 s) for up to
+    /// `retry_for`. Once registered, ksni itself re-registers whenever the tray host restarts.
+    pub async fn spawn_with_retry(make: impl Fn() -> SniTray, retry_for: Duration) -> Result<ksni::Handle<SniTray>, ksni::Error> {
+        use ksni::TrayMethods;
+        let give_up = tokio::time::Instant::now() + retry_for;
+        let mut pause = START_RETRY_FIRST;
+        loop {
+            match make().spawn().await {
+                Ok(handle) => return Ok(handle),
+                Err(e) if tokio::time::Instant::now() + pause <= give_up => {
+                    tracing::debug!("no system tray yet ({e}); trying again in {pause:?}");
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(START_RETRY_MAX);
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     impl SniTray {
         pub fn new(entries: Vec<MenuEntry>, tooltip: String, on_action: OnAction) -> Self {
-            Self { entries, tooltip, seq: 0, on_action, icons: icons() }
+            Self { entries, tooltip, seq: 0, on_action, on_watcher: None, icons: icons() }
+        }
+
+        pub fn with_watcher(mut self, on_watcher: OnWatcher) -> Self {
+            self.on_watcher = Some(on_watcher);
+            self
         }
 
         /// Take the menu and tooltip of push number `seq`, unless a later push already arrived. Each push runs on
@@ -181,6 +215,17 @@ mod sni {
         }
         fn secondary_activate(&mut self, _x: i32, _y: i32) {
             (self.on_action)(Action::PlayPause);
+        }
+        fn watcher_online(&self) {
+            if let Some(f) = &self.on_watcher {
+                f(true);
+            }
+        }
+        fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
+            if let Some(f) = &self.on_watcher {
+                f(false);
+            }
+            true // keep the service: ksni registers again when the tray host comes back
         }
         fn menu(&self) -> Vec<MenuItem<Self>> {
             self.entries
@@ -234,6 +279,71 @@ mod sni {
             assert!(icons.iter().all(|i| i.data.len() == (i.width * i.height * 4) as usize));
         }
 
+        /// A stand-in for the desktop's tray host: it reports every item that registers.
+        struct Watcher(tokio::sync::mpsc::UnboundedSender<String>);
+        #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+        impl Watcher {
+            async fn register_status_notifier_item(&self, service: String) {
+                let _ = self.0.send(service);
+            }
+            async fn register_status_notifier_host(&self, _service: String) {}
+            #[zbus(property)]
+            async fn is_status_notifier_host_registered(&self) -> bool {
+                true
+            }
+            #[zbus(property)]
+            async fn registered_status_notifier_items(&self) -> Vec<String> {
+                Vec::new()
+            }
+            #[zbus(property)]
+            async fn protocol_version(&self) -> i32 {
+                0
+            }
+        }
+
+        /// The D-Bus tests share one session bus, where only one tray host can exist: they take turns.
+        static BUS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        async fn fake_tray_host(tx: tokio::sync::mpsc::UnboundedSender<String>) -> zbus::Connection {
+            zbus::connection::Builder::session()
+                .name("org.kde.StatusNotifierWatcher")
+                .serve_at("/StatusNotifierWatcher", Watcher(tx))
+                .build()
+                .await
+                .expect("the fake tray host")
+        }
+
+        /// The app started before the desktop's tray host (login, a restored KDE session): the tray keeps trying and
+        /// registers once the host is up. Opt-in like the test below (`just tray-test`).
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs a D-Bus session bus (run under dbus-run-session)"]
+        async fn the_tray_registers_once_a_late_tray_host_appears() {
+            use std::time::Duration;
+            use tokio::sync::mpsc::unbounded_channel;
+            let _bus = BUS.lock().await;
+
+            let make = || SniTray::new(Vec::new(), "x".into(), Arc::new(|_| {}));
+            let tray = tokio::spawn(spawn_with_retry(make, Duration::from_secs(20)));
+            tokio::time::sleep(Duration::from_millis(2500)).await; // a couple of failed attempts first
+            assert!(!tray.is_finished(), "still trying while there is no tray host");
+            let (tx, mut rx) = unbounded_channel();
+            let _host = fake_tray_host(tx).await;
+            let handle = tokio::time::timeout(Duration::from_secs(10), tray).await.expect("registered in time").unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("the host saw the registration").unwrap();
+            handle.shutdown().await;
+        }
+
+        /// With no tray host at all, it gives up after the time it was given.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs a D-Bus session bus (run under dbus-run-session)"]
+        async fn the_tray_registers_nowhere_and_gives_up_without_a_tray_host() {
+            use std::time::Duration;
+            let _bus = BUS.lock().await;
+            let make = || SniTray::new(Vec::new(), "x".into(), Arc::new(|_| {}));
+            let r = tokio::time::timeout(Duration::from_secs(10), spawn_with_retry(make, Duration::from_secs(2))).await;
+            assert!(r.expect("gave up in time").is_err());
+        }
+
         /// End to end against a stand-in for the desktop's tray host: a fake `org.kde.StatusNotifierWatcher` on the
         /// session bus. The tray must register itself, publish its icon and tooltip, and serve its menu over dbusmenu
         /// with the same entries the unit tests check. Needs a session bus, so it is opt-in:
@@ -243,43 +353,18 @@ mod sni {
         async fn the_tray_registers_with_a_tray_host_and_serves_its_menu() {
             use ksni::TrayMethods;
             use std::time::Duration;
-            use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
-
-            struct Watcher(UnboundedSender<String>);
-            #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
-            impl Watcher {
-                async fn register_status_notifier_item(&self, service: String) {
-                    let _ = self.0.send(service);
-                }
-                async fn register_status_notifier_host(&self, _service: String) {}
-                #[zbus(property)]
-                async fn is_status_notifier_host_registered(&self) -> bool {
-                    true
-                }
-                #[zbus(property)]
-                async fn registered_status_notifier_items(&self) -> Vec<String> {
-                    Vec::new()
-                }
-                #[zbus(property)]
-                async fn protocol_version(&self) -> i32 {
-                    0
-                }
-            }
+            use tokio::sync::mpsc::unbounded_channel;
+            let _bus = BUS.lock().await;
 
             let (tx, mut rx) = unbounded_channel();
-            let host = zbus::connection::Builder::session()
-                .name("org.kde.StatusNotifierWatcher")
-                .serve_at("/StatusNotifierWatcher", Watcher(tx))
-                .build()
-                .await
-                .expect("the fake tray host");
+            let host = fake_tray_host(tx).await;
 
             let state =
                 TrayState { playing: true, has_track: true, signed_in: true, liked: false, window_visible: true, mini_visible: false };
             let clicked = Arc::new(Mutex::new(Vec::new()));
             let sink = clicked.clone();
             let tray = SniTray::new(tray_menu(&state), "Song — Artist".into(), Arc::new(move |a| sink.lock().unwrap().push(a)));
-            let _handle = tray.spawn().await.expect("the tray registers with the host");
+            let handle = tray.spawn().await.expect("the tray registers with the host");
             let service = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no registration within 5 s").unwrap();
 
             // The registered item publishes its title, tooltip and icon.
@@ -303,6 +388,7 @@ mod sni {
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
             assert_eq!(*clicked.lock().unwrap(), vec![Action::Next, Action::Quit]);
+            handle.shutdown().await;
         }
 
         #[test]
@@ -406,15 +492,23 @@ impl qobject::TrayMenuModel {
             self.as_mut().rust_mut().get_mut().started = true;
             let th = self.qt_thread();
             let th_ready = th.clone();
+            let th_watcher = th.clone();
             let on_action: sni::OnAction = Arc::new(move |a| {
                 let id = a.id();
                 let _ = th.queue(move |mut m| m.as_mut().activated(QString::from(id)));
             });
-            let tray = sni::SniTray::new(self.rust().entries.clone(), self.rust().tooltip.clone(), on_action);
+            // `available` follows the tray host after the first registration too (plasmashell restarting, the
+            // tray widget removed), so "Close to tray" never hides the window where no tray is left to bring it back.
+            let on_watcher: sni::OnWatcher = Arc::new(move |up| {
+                let _ = th_watcher.queue(move |mut m| m.as_mut().set_available(up));
+            });
+            let (entries, tooltip) = (self.rust().entries.clone(), self.rust().tooltip.clone());
+            let make = move || {
+                sni::SniTray::new(entries.clone(), tooltip.clone(), on_action.clone()).with_watcher(on_watcher.clone())
+            };
             let slot = self.rust().handle.clone();
             crate::state::st().rt.spawn(async move {
-                use ksni::TrayMethods;
-                match tray.spawn().await {
+                match sni::spawn_with_retry(make, sni::START_RETRY_FOR).await {
                     Ok(handle) => {
                         *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handle));
                         let _ = th_ready.queue(|mut m| {
@@ -424,8 +518,11 @@ impl qobject::TrayMenuModel {
                             m.as_mut().set_available(true);
                         });
                     }
-                    // No StatusNotifierWatcher / no session bus: simply no tray.
-                    Err(e) => tracing::info!("no system tray: {e}"),
+                    // Still no StatusNotifierWatcher / no session bus: simply no tray. A later `start` tries again.
+                    Err(e) => {
+                        tracing::info!("no system tray: {e}");
+                        let _ = th_ready.queue(|mut m| m.as_mut().rust_mut().get_mut().started = false);
+                    }
                 }
             });
         }
