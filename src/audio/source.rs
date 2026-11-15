@@ -145,6 +145,11 @@ fn block_on_interruptible<T>(fut: impl std::future::Future<Output = T>) -> io::R
     })
 }
 
+/// How often a response that broke off is asked for again (from where it stopped) before the stream counts as
+/// interrupted, and the wait before the n-th attempt (n times this).
+const RESUME_ATTEMPTS: u32 = 3;
+const RESUME_BACKOFF: Duration = Duration::from_millis(300);
+
 /// Forward seeks shorter than this are served by reading and discarding (keeps the connection).
 const SKIP_LIMIT: u64 = 32 * 1024;
 
@@ -201,19 +206,37 @@ impl HttpRangeSource {
     }
 
     /// Next piece of the open response (or `None` at its end).
+    ///
+    /// A body that breaks off (a short network glitch) is asked for again from the byte it stopped at, a few times,
+    /// before it counts as interrupted: the server supports `Range`, so nothing has to start over.
     fn next_chunk(&mut self) -> io::Result<Option<bytes::Bytes>> {
-        let Some(resp) = self.resp.as_mut() else { return Ok(None) };
-        // Giving up on the wait keeps the response: `chunk` holds no data between its polls, so the next call goes on
-        // with the same body.
-        match block_on_interruptible(resp.chunk())? {
-            Ok(Some(b)) => Ok(Some(b)),
-            Ok(None) => {
-                self.resp = None;
-                Ok(None)
-            }
-            Err(e) => {
-                self.resp = None;
-                Err(io_err(format!("stream interrupted: {}", e.without_url())))
+        let mut attempts = 0;
+        loop {
+            let Some(resp) = self.resp.as_mut() else { return Ok(None) };
+            // Giving up on the wait keeps the response: `chunk` holds no data between its polls, so the next call goes
+            // on with the same body.
+            let e = match block_on_interruptible(resp.chunk())? {
+                Ok(Some(b)) => return Ok(Some(b)),
+                Ok(None) => {
+                    self.resp = None;
+                    return Ok(None);
+                }
+                Err(e) => io_err(e.without_url().to_string()),
+            };
+            self.resp = None;
+            let mut last = e;
+            // the open response delivers its next byte at `end`: carry on from there
+            while self.resp.is_none() {
+                attempts += 1;
+                if attempts > RESUME_ATTEMPTS || self.end >= self.len {
+                    return Err(io_err(format!("stream interrupted: {last}")));
+                }
+                block_on_interruptible(async { tokio::time::sleep(RESUME_BACKOFF * attempts).await })?;
+                match self.request(self.end) {
+                    Ok(r) => self.resp = Some(r),
+                    Err(e) if interrupt_pending() => return Err(e),
+                    Err(e) => last = e,
+                }
             }
         }
     }

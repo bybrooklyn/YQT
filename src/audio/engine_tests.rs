@@ -16,6 +16,8 @@ enum Mode {
     Normal,
     /// Send only this many bytes of the body, then hang up (headers still promise the whole file).
     Truncate(usize),
+    /// Never send anything past this byte of the file, whatever range is asked for; hang up there instead.
+    CutAt(usize),
     /// Send only this many bytes of each response, then keep the connection open without sending anything more.
     Stall(usize),
 }
@@ -67,6 +69,7 @@ fn handle(mut s: TcpStream, mode: Mode) -> std::io::Result<()> {
     let send = match mode {
         Mode::Normal => slice,
         Mode::Truncate(n) | Mode::Stall(n) => &slice[..n.min(slice.len())],
+        Mode::CutAt(n) => &slice[..n.saturating_sub(start).min(slice.len())],
     };
     for piece in send.chunks(4096) {
         s.write_all(piece)?;
@@ -222,9 +225,33 @@ fn failures_become_failed_events_not_panics() {
     wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(_))).expect("recovers");
 }
 
+/// A connection that breaks off mid-song (a short network glitch) is picked up again where it stopped: the track
+/// plays to its end instead of failing, which made the player start it over from 0:00.
+#[test]
+fn a_connection_that_breaks_off_is_resumed_and_the_track_plays_to_its_end() {
+    let base = serve(Mode::Truncate(20_000)); // fixture is ~39 KB: each response stops 20 KB after where it starts
+    let (e, rx) = engine();
+    e.load(&format!("{base}/ok/sine440_opus.webm"), 0);
+    e.play();
+    let seen = wait_for(&rx, 8, |ev| matches!(ev, Event::Ended(_) | Event::Failed(_))).expect("ended");
+    assert!(matches!(seen.last(), Some(Event::Ended(_))), "{seen:?}");
+    let end = e.position_ms();
+    assert!((1900.0..2200.0).contains(&end), "played through to {end} ms");
+}
+
+#[test]
+fn http_range_source_resumes_a_body_that_breaks_off() {
+    let base = serve(Mode::Truncate(10_000));
+    let file = std::fs::read(fixture("sine440_opus.webm")).unwrap();
+    let mut s = HttpRangeSource::open(&format!("{base}/ok/sine440_opus.webm")).unwrap();
+    let mut all = Vec::new();
+    s.read_to_end(&mut all).unwrap();
+    assert_eq!(all, file, "every byte, across several broken-off responses");
+}
+
 #[test]
 fn a_truncated_stream_fails_cleanly() {
-    let base = serve(Mode::Truncate(20_000)); // fixture is ~39 KB
+    let base = serve(Mode::CutAt(20_000)); // fixture is ~39 KB; asking again never gets past that byte
     let (e, rx) = engine();
     e.load(&format!("{base}/ok/sine440_opus.webm"), 0);
     e.play();

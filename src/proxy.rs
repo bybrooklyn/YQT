@@ -32,6 +32,11 @@ static CTX: OnceLock<Arc<Ctx>> = OnceLock::new();
 
 const MAX_HEAD: usize = 16 * 1024;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often an upstream chunk that failed (or broke off without a byte) is asked for again before the stream is given
+/// up, and the wait before the n-th of those attempts (n times this). A short glitch mid-song must not end the
+/// connection early: the player would take that for a broken track and start it over.
+const UPSTREAM_RETRIES: u32 = 3;
+const UPSTREAM_BACKOFF: Duration = Duration::from_millis(250);
 
 /// What a request is checked against.
 struct Ctx {
@@ -498,6 +503,8 @@ async fn handle(mut sock: TcpStream, client: reqwest::Client, ctx: &Ctx) -> std:
         return Ok(());
     }
     let mut pos = start;
+    // failed attempts in a row at the same `pos`; any progress starts the count again
+    let mut failures = 0;
     loop {
         let before = pos;
         while let Ok(Some(bytes)) = resp.chunk().await {
@@ -509,14 +516,39 @@ async fn handle(mut sock: TcpStream, client: reqwest::Client, ctx: &Ctx) -> std:
                 return Ok(());
             }
         }
-        // An empty or failing answer made no progress: stop instead of asking for the same range forever.
-        if pos > end || pos == before {
+        if pos > end {
             return Ok(());
         }
-        resp = match fetch(pos, end.min(pos.saturating_add(ch - 1))).await {
-            Ok(r) if r.status().as_u16() == 206 => r,
-            _ => return Ok(()),
+        // An empty or failing answer made no progress: ask again a few times, but never for the same range forever.
+        failures = if pos == before { failures + 1 } else { 0 };
+        resp = loop {
+            if failures > UPSTREAM_RETRIES {
+                return Ok(());
+            }
+            let attempt = async {
+                tokio::time::sleep(UPSTREAM_BACKOFF * failures).await;
+                fetch(pos, end.min(pos.saturating_add(ch - 1))).await
+            };
+            // The client may hang up meanwhile (a seek, a skip, shutdown): then nobody waits for this any more.
+            tokio::select! {
+                r = attempt => match r {
+                    Ok(r) if r.status().as_u16() == 206 => break r,
+                    _ => failures += 1,
+                },
+                () = client_gone(&mut sock) => return Ok(()),
+            }
         };
+    }
+}
+
+/// Resolves once the client has closed the connection (it sends nothing after its request head).
+async fn client_gone(sock: &mut TcpStream) {
+    let mut b = [0u8; 1];
+    loop {
+        match sock.read(&mut b).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {} // nothing else is expected on a request we are answering: ignore it
+        }
     }
 }
 
@@ -666,6 +698,100 @@ mod tests {
         }
         let head = raw(port, &req("HEAD", "/t/tok/w7norange", &host)).await;
         assert!(head.starts_with("HTTP/1.1 200 OK") && head.ends_with("\r\n\r\n"), "{head}");
+    }
+
+    /// A fake googlevideo with an 11-byte body whose answers for any range starting past byte 0 fail (the connection
+    /// is dropped without a reply) while `glitches` is above 0, each failure using one up.
+    async fn glitchy_upstream(glitches: Arc<std::sync::atomic::AtomicUsize>) -> u16 {
+        use std::sync::atomic::Ordering::SeqCst;
+        const BODY: &[u8] = b"hello world";
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                let glitches = glitches.clone();
+                tokio::spawn(async move {
+                    let mut b = [0u8; 4096];
+                    let n = s.read(&mut b).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&b[..n]).to_ascii_lowercase();
+                    let (a, e) = head.lines().find_map(|l| l.strip_prefix("range: bytes=")).and_then(|r| r.trim().split_once('-')).unwrap();
+                    let (a, e): (usize, usize) = (a.parse().unwrap(), e.parse::<usize>().unwrap().min(BODY.len() - 1));
+                    if a > 0 && glitches.try_update(SeqCst, SeqCst, |g| g.checked_sub(1)).is_ok() {
+                        return; // dropped: the network went away for a moment
+                    }
+                    let mut h = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{e}/{}\r\nContent-Type: audio/webm\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        BODY.len(),
+                        e + 1 - a
+                    )
+                    .into_bytes();
+                    h.extend_from_slice(&BODY[a..=e]);
+                    let _ = s.write_all(&h).await;
+                });
+            }
+        });
+        port
+    }
+
+    fn start_chunked(chunk: u64) -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let c = Arc::new(Ctx { port, token: Some("tok".into()), chunk, dl_dir: None, cover_dir: None });
+        serve(l, c, reqwest::Client::new(), &tokio::runtime::Handle::current());
+        port
+    }
+
+    /// A chunk fetch that fails mid-stream used to end the connection short of its Content-Length; the player took that
+    /// for a broken track and started the song over from 0:00.
+    #[tokio::test]
+    async fn a_short_upstream_glitch_between_chunks_is_retried() {
+        let glitches = Arc::new(std::sync::atomic::AtomicUsize::new(UPSTREAM_RETRIES as usize));
+        let up = glitchy_upstream(glitches.clone()).await;
+        URLS.lock().unwrap().get_or_insert_default().insert("w7glitch".into(), (format!("http://127.0.0.1:{up}/x"), "ua".into()));
+        let port = start_chunked(4); // "hell" "o wo" "rld": three upstream requests
+        let host = format!("127.0.0.1:{port}");
+        let r = raw(port, &req("GET", "/t/tok/w7glitch", &host)).await;
+        assert!(r.contains("Content-Length: 11") && r.ends_with("\r\n\r\nhello world"), "every byte arrives: {r}");
+        assert_eq!(glitches.load(std::sync::atomic::Ordering::SeqCst), 0, "the failures were really there");
+    }
+
+    /// An upstream that stays gone is not waited for forever: the connection ends (short) after a few attempts.
+    #[tokio::test]
+    async fn an_upstream_that_stays_gone_ends_the_stream_after_a_few_attempts() {
+        let up = glitchy_upstream(Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX))).await;
+        URLS.lock().unwrap().get_or_insert_default().insert("w7gone".into(), (format!("http://127.0.0.1:{up}/x"), "ua".into()));
+        let port = start_chunked(4);
+        let host = format!("127.0.0.1:{port}");
+        let t = std::time::Instant::now();
+        let r = raw(port, &req("GET", "/t/tok/w7gone", &host)).await;
+        assert!(r.contains("Content-Length: 11") && r.ends_with("\r\n\r\nhell"), "only the first chunk: {r}");
+        assert!(t.elapsed() < Duration::from_secs(4), "gave up in {:?}", t.elapsed());
+    }
+
+    /// While the proxy waits to ask again, a client that hangs up (a seek, a skip) ends the wait at once.
+    #[tokio::test]
+    async fn a_client_hanging_up_ends_the_retries() {
+        let glitches = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let up = glitchy_upstream(glitches.clone()).await;
+        URLS.lock().unwrap().get_or_insert_default().insert("w7hangup".into(), (format!("http://127.0.0.1:{up}/x"), "ua".into()));
+        let port = start_chunked(4);
+        let host = format!("127.0.0.1:{port}");
+        let mut s = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(&req("GET", "/t/tok/w7hangup", &host)).await.unwrap();
+        let mut b = [0u8; 4096];
+        let mut got = Vec::new();
+        while !got.ends_with(b"hell") {
+            let n = s.read(&mut b).await.unwrap();
+            assert!(n > 0);
+            got.extend_from_slice(&b[..n]);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await; // the first retry has failed, the next one waits
+        let used = usize::MAX - glitches.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(used >= 1, "{used}");
+        drop(s);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let after = usize::MAX - glitches.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after <= used + 1, "the proxy stopped asking once the client was gone: {used} -> {after}");
     }
 
     #[test]

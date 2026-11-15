@@ -137,6 +137,8 @@ pub struct PlayerRust {
     retried: u64,       // generation that already had one automatic retry
     playing: bool,      // what QML last reported through `sync_mpris`
     hold_saves: bool,   // a restore / in-place reload is running: the session file stays as it is
+    /// (generation, ms): the last position QML reported for the track loaded in that generation
+    last_pos: Option<(u64, i64)>,
 }
 
 impl Default for PlayerRust {
@@ -170,6 +172,7 @@ impl Default for PlayerRust {
             retried: u64::MAX,
             playing: false,
             hold_saves: false,
+            last_pos: None,
         }
     }
 }
@@ -737,7 +740,11 @@ impl qobject::Player {
         let Some(item) = (cur >= 0).then(|| self.rust().state.get(cur as usize).cloned()).flatten() else { return };
         if self.rust().retried != generation {
             // Stream URLs can expire or get cut off: fetch a fresh one once.
-            let (autoplay, resume_pos) = (*self.autoplay(), *self.resume_pos());
+            let (autoplay, mut resume_pos) = (*self.autoplay(), *self.resume_pos());
+            if resume_pos <= 0 {
+                // It broke mid-song: go on from about where it was, not from 0:00 (still this very track: same generation).
+                resume_pos = self.rust().last_pos.filter(|&(g, _)| g == generation).map_or(0, |(_, ms)| ms);
+            }
             self.as_mut().st_mut().retried = generation;
             forget(&s(&item, "videoId"));
             // the same track again: keep where a restored session wanted to resume, and what the file says
@@ -826,6 +833,12 @@ impl qobject::Player {
 
     fn sync_mpris(mut self: Pin<&mut Self>, playing: bool, position: i64, duration: i64) {
         self.as_mut().st_mut().playing = playing;
+        // Where a stream that breaks off mid-song is picked up again (see `media_failed`). Not while the track is
+        // still being looked up (the position is the previous track's then), and not the 0 a failed stream falls to.
+        if position > 0 && *self.has_track() && !*self.loading() {
+            let g = self.rust().generation;
+            self.as_mut().st_mut().last_pos = Some((g, position));
+        }
         let snap = crate::mpris::Snap {
             has_track: *self.has_track(),
             playing,
