@@ -402,7 +402,7 @@ impl Default for Youtube {
         Self {
             language: "en".into(),
             music_origin: "https://music.youtube.com".into(),
-            web_remix_client_version: "1.20250101.01.00".into(),
+            web_remix_client_version: "1.20261110.04.00".into(),
             android_vr_client_version: "1.60.19".into(),
             visionos_client_version: "1.02".into(),
             visionos_os_version: "26.5.23O471".into(),
