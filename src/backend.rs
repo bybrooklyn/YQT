@@ -1254,6 +1254,36 @@ fn check_done() -> bool {
     CHECKS.lock().unwrap().done(std::time::Instant::now())
 }
 
+/// Told when a check (and any rerun it owed) has published its answer: `recheck_session` waits for it.
+static CHECKED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// The Backend's thread, for code with no `Backend` of its own that needs a session check (the page loaders in
+/// `pages/`). Set once the app asks for its first check.
+static BACKEND: Mutex<Option<cxx_qt::CxxQtThread<qobject::Backend>>> = Mutex::new(None);
+/// How long `recheck_session` waits for an answer before the request's own error stands.
+const RECHECK_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// A signed-in request made outside the `Backend` plumbing (the page loaders in `pages/`) failed because of the
+/// session. As `finish` does for the Backend's own requests: have the session checked (which renews it from the
+/// browser, or signs out) instead of taking the request's word, and wait for the answer. True when the session stands
+/// afterwards, as it was or renewed, so the request is worth sending once more with it; false when the user is signed
+/// out now, or no check could be had (one just found the session good: the request's own error stands).
+pub(crate) async fn recheck_session() -> bool {
+    let Some(th) = BACKEND.lock().unwrap().clone() else { return false };
+    if auth::stored_cookie().is_none() {
+        // nothing to check or renew: signed out (as `finish` does)
+        set_logged(false);
+        let _ = th.queue(|mut b| b.as_mut().set_logged_in(false));
+        return false;
+    }
+    let checked = CHECKED.notified();
+    tokio::pin!(checked);
+    checked.as_mut().enable(); // before asking: a check that ends at once is not missed
+    if !verify_session(th, false) {
+        return false;
+    }
+    tokio::time::timeout(RECHECK_WAIT, checked).await.is_ok() && is_logged_in()
+}
+
 /// Ask YouTube whether the stored sign-in still stands and publish the answer. Browsers keep rotating these
 /// cookies, so a stored copy goes stale (typically overnight); if the sign-in came from a browser its current cookies
 /// are taken again instead of asking the user to. Only when that fails too is the user signed out.
@@ -1317,6 +1347,7 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
                         forced = true; // and signed in again since: that sign-in is checked now
                         continue;
                     }
+                    CHECKED.notify_waiters();
                     return;
                 }
                 if check_done() {
@@ -1333,6 +1364,7 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
                 }
                 set_logged(ok);
             }
+            CHECKED.notify_waiters();
             // Publish the sign-in state FIRST; the liked-songs preload below is slow and must never gate it.
             let th_liked = th.clone();
             let expired = !ok && had_cookie;
@@ -1502,6 +1534,7 @@ impl qobject::Backend {
             set_logged(true);
             self.as_mut().set_logged_in(true);
         }
+        *BACKEND.lock().unwrap() = Some(self.qt_thread());
         verify_session(self.qt_thread(), true);
         watch_ui_thread(self.qt_thread());
     }

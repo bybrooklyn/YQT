@@ -81,6 +81,34 @@ fn session_trouble(e: &AppError) -> bool {
     e.kind == ErrorKind::Auth || e.headline == crate::errors::SESSION_SUSPECT_MSG
 }
 
+/// [`retry_as`] with the session. A failure that is the session's goes through the same check as the Backend's own
+/// requests (`backend::recheck_session`: renewed from the browser, or signed out) and, if the session stands after
+/// it, the request is sent once more.
+async fn retry_signed_in<T, F, Fut>(mut f: F) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, rustypipe::error::Error>>,
+{
+    match retry_as(true, &mut f).await {
+        Err(e) if session_trouble(&e) && crate::backend::recheck_session().await => retry_as(true, f).await,
+        r => r,
+    }
+}
+
+/// A legacy loader (`backend.rs`), with the session check its signed-in requests get through `finish` when the
+/// Backend runs them: a refusal or a "sign in" page has the session checked, and the page is loaded once more if the
+/// session stands after it. (The legacy loaders only say "sign in" for a request made with the session.)
+async fn legacy_signed_in<F, Fut>(mut f: F) -> Result<Value, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Value, String>>,
+{
+    match f().await.map_err(|e| error_from_ui_string(&e)) {
+        Err(e) if session_trouble(&e) && crate::backend::recheck_session().await => f().await.map_err(|e| error_from_ui_string(&e)),
+        r => r,
+    }
+}
+
 // ---- continuation of track lists (playlists) ------------------------------------------------------------------
 
 /// Pager ids of this module start here, far above the ids the legacy loaders hand out.
@@ -132,11 +160,16 @@ pub fn forget(pager: u32) {
 
 async fn more_tracks(id: u32) -> Result<PageData, AppError> {
     let mut cont = conts(|m| m.remove(&id)).ok_or_else(|| AppError::new(ErrorKind::NotFound, "No more results", ""))?;
-    let q = if cont.authenticated { st().rp.query().authenticated() } else { st().rp.query() };
-    if let Err(e) = cont.pager.extend(&q).await {
-        let authenticated = cont.authenticated;
+    let authenticated = cont.authenticated;
+    let q = if authenticated { st().rp.query().authenticated() } else { st().rp.query() };
+    let mut r = cont.pager.extend(&q).await.map_err(|e| AppError::from_rustypipe_request(&e, authenticated, authenticated));
+    // (a list read with the session: the session is checked, and renewed, as for the first page)
+    if authenticated && r.as_ref().is_err_and(session_trouble) && crate::backend::recheck_session().await {
+        r = cont.pager.extend(&q).await.map_err(|e| AppError::from_rustypipe_request(&e, true, true));
+    }
+    if let Err(e) = r {
         conts(|m| m.insert(id, cont)); // allow a retry
-        return Err(AppError::from_rustypipe_request(&e, authenticated, authenticated));
+        return Err(e);
     }
     let new = common::numbered_tracks(cont.pager.items.get(cont.shown..).unwrap_or_default(), &cont.cover, cont.shown);
     cont.shown = cont.pager.items.len();
@@ -188,7 +221,7 @@ pub fn page_from_value(v: &Value) -> PageData {
 }
 
 async fn legacy_browse(target: String) -> Result<PageData, AppError> {
-    crate::backend::browse(target).await.map(|v| page_from_value(&v)).map_err(|e| error_from_ui_string(&e))
+    legacy_signed_in(|| crate::backend::browse(target.clone())).await.map(|v| page_from_value(&v))
 }
 
 /// Explore: shelves of new releases and videos.
@@ -222,7 +255,7 @@ pub async fn more(pager: u32) -> Result<PageData, AppError> {
     if pager > PAGER_BASE {
         return more_tracks(pager).await;
     }
-    crate::backend::more(pager as i32).await.map(|v| page_from_value(&v)).map_err(|e| error_from_ui_string(&e))
+    legacy_signed_in(|| crate::backend::more(pager as i32)).await.map(|v| page_from_value(&v))
 }
 
 /// One independently loadable row of Home.
@@ -298,6 +331,25 @@ mod tests {
         assert!(!session_trouble(&signed_in(Error::HttpStatus(404, "x".into()))), "missing is missing, with or without it");
         let anonymous = AppError::from_rustypipe_request(&Error::HttpStatus(403, "x".into()), false, false);
         assert!(!session_trouble(&anonymous), "a refusal without the session says nothing about it");
+    }
+
+    #[test]
+    fn a_refusal_with_no_session_check_to_be_had_stands_and_is_sent_only_once() {
+        // (no Backend in a test: `recheck_session` has nothing to ask, as before the app's first check)
+        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let mut sent = 0;
+        let r: Result<(), AppError> = rt.block_on(retry_signed_in(|| {
+            sent += 1;
+            async { Err(rustypipe::error::Error::HttpStatus(403, "x".into())) }
+        }));
+        assert_eq!(r.unwrap_err().kind, ErrorKind::Auth);
+        assert_eq!(sent, 1);
+        let mut loads = 0;
+        let r = rt.block_on(legacy_signed_in(|| {
+            loads += 1;
+            async { Err(AUTH_MSG.to_owned()) }
+        }));
+        assert_eq!((r.unwrap_err().kind, loads), (ErrorKind::Auth, 1));
     }
 
     #[test]

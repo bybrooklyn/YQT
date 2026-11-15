@@ -21,7 +21,7 @@ pub fn restyle(tab: &str, mut page: PageData) -> PageData {
 }
 
 pub async fn load(tab: &str) -> Result<PageData, AppError> {
-    let value = crate::backend::browse(format!("library:{tab}")).await.map_err(|e| super::error_from_ui_string(&e))?;
+    let value = super::legacy_signed_in(|| crate::backend::browse(format!("library:{tab}"))).await?;
     Ok(restyle(tab, super::page_from_value(&value)))
 }
 
