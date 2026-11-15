@@ -508,10 +508,19 @@ fn with_store<R>(f: impl FnOnce(&Store) -> R) -> Option<R> {
     g.as_ref().map(f)
 }
 
+static INIT: OnceLock<()> = OnceLock::new();
+static INIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// Has [`init`] finished? Until then the UI gets neutral answers instead of waiting for it on the Qt thread.
+pub fn ready() -> bool {
+    INIT.get().is_some()
+}
+
 /// One-time start-up: open the index, reconcile with the disk, start the pause watcher and the smart loop.
+/// Slow (it reads the whole downloads folder and asks NetworkManager), so the app runs it on its own thread.
 pub fn init() {
-    static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| {
+    INIT_STARTED.store(true, Ordering::Relaxed);
+    INIT.get_or_init(|| {
         let cfg = Settings::load();
         let _ = crate::state::ensure_private_dir(&cfg.dir);
         if let Some((have, used, again)) = with_store(|s| {
@@ -611,7 +620,11 @@ pub fn active_count() -> i32 {
 }
 
 pub fn set_paused(on: bool) {
-    init(); // the watcher must be there: resuming is its decision
+    // The watcher must be there: resuming is its decision. If `init` is already under way it is not waited for (that
+    // would freeze the window): the watcher it starts reads `user_paused` before it starts anything.
+    if !INIT_STARTED.load(Ordering::Relaxed) {
+        init();
+    }
     mgr().inner.lock().unwrap().user_paused = on;
     if on {
         // pausing applies immediately

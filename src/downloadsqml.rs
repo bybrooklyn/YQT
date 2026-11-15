@@ -80,7 +80,8 @@ pub mod qobject {
         #[qinvokable]
         fn local_url(self: Pin<&mut Downloads>, video_id: &QString) -> QString;
 
-        /// Something about this song changed (state, progress milestone, removal, pin).
+        /// Something about this song changed (state, progress milestone, removal, pin). An empty id: everything may
+        /// have (the index finished loading at start-up), re-read what is shown.
         #[qsignal]
         fn changed(self: Pin<&mut Downloads>, video_id: QString);
         /// Live progress of a running download.
@@ -133,11 +134,15 @@ impl cxx_qt::Initialize for qobject::Downloads {
         crate::connectivity::subscribe(move |online| {
             let _ = th.queue(move |mut d| d.as_mut().set_offline(!online));
         });
-        // opening the index and reconciling with the disk must not stall the UI thread
+        // Opening the index and reconciling with the disk must not stall the UI thread. Until it is done the
+        // getters below answer "nothing downloaded" instead of waiting; then the UI is told to look again.
         let th = self.qt_thread();
         std::thread::spawn(move || {
             manager::init();
-            let _ = th.queue(|d| d.refresh_stats());
+            let _ = th.queue(|mut d| {
+                d.as_mut().refresh_stats();
+                d.as_mut().changed(QString::default());
+            });
         });
     }
 }
@@ -179,17 +184,17 @@ impl qobject::Downloads {
     }
 
     fn is_downloaded(&self, video_id: &QString) -> bool {
-        manager::init();
-        manager::is_downloaded(&video_id.to_string())
+        manager::ready() && manager::is_downloaded(&video_id.to_string())
     }
 
     fn state(&self, video_id: &QString) -> QString {
-        manager::init();
-        QString::from(manager::state_of(&video_id.to_string()).0)
+        QString::from(if manager::ready() { manager::state_of(&video_id.to_string()).0 } else { "none" })
     }
 
     fn percent(&self, video_id: &QString) -> i32 {
-        manager::init();
+        if !manager::ready() {
+            return 0;
+        }
         manager::state_of(&video_id.to_string()).1
     }
 
@@ -202,8 +207,7 @@ impl qobject::Downloads {
     }
 
     fn is_kept_offline(&self, collection_id: &QString) -> bool {
-        manager::init();
-        manager::is_kept_offline(&collection_id.to_string())
+        manager::ready() && manager::is_kept_offline(&collection_id.to_string())
     }
 
     fn pause_all(self: Pin<&mut Self>, on: bool) {
@@ -211,8 +215,7 @@ impl qobject::Downloads {
     }
 
     fn list(&self) -> QString {
-        manager::init();
-        QString::from(&manager::list_json())
+        QString::from(if manager::ready() { manager::list_json() } else { "[]".to_owned() }.as_str())
     }
 
     fn played(self: Pin<&mut Self>, video_id: &QString) {
