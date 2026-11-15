@@ -66,6 +66,18 @@ fn reconcile<T>(optimistic: &mut VecDeque<(usize, usize)>, change: Change<T>) ->
     out
 }
 
+/// The row of `rows` holding `video_id`: `at` itself if it still does, else the nearest one that does.
+fn row_of(rows: &[QueueRow], at: i32, video_id: &str) -> Option<usize> {
+    if video_id.is_empty() {
+        return None;
+    }
+    rows.iter()
+        .enumerate()
+        .filter(|(_, r)| r.video_id == video_id)
+        .min_by_key(|(i, _)| (*i as i64 - i64::from(at)).abs())
+        .map(|(i, _)| i)
+}
+
 /// Called by the `Player` after every queue edit; `snapshot` is only used when the model is not alive yet.
 pub fn publish(change: Change<Value>, snapshot: impl FnOnce() -> Vec<Value>) {
     let rows_change = match change {
@@ -102,6 +114,8 @@ pub mod qobject {
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
         include!("cxx-qt-lib/qvariant.h");
         type QVariant = cxx_qt_lib::QVariant;
+        include!("cxx-qt-lib/qstring.h");
+        type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qmodelindex.h");
         type QModelIndex = cxx_qt_lib::QModelIndex;
         include!("cxx-qt-lib/qvector.h");
@@ -128,6 +142,10 @@ pub mod qobject {
         /// Move this row to just after the playing one.
         #[qinvokable]
         fn play_row_next(self: Pin<&mut QueueModel>, at: i32);
+        /// Where the song `video_id`, last seen at row `at`, is now: `at` if it is still there, else its nearest
+        /// row, or -1 when it is no longer queued. A menu opened on a row acts on the song, not on the number.
+        #[qinvokable]
+        fn row_of(self: &QueueModel, at: i32, video_id: &QString) -> i32;
 
         #[inherit]
         #[cxx_name = "beginInsertRows"]
@@ -267,6 +285,10 @@ impl qobject::QueueModel {
         }
     }
 
+    pub fn row_of(&self, at: i32, video_id: &QString) -> i32 {
+        row_of(&self.rows, at, &video_id.to_string()).map_or(-1, |i| i as i32)
+    }
+
     /// Keep the `count` property in step after a change was applied.
     pub fn sync_count(mut self: Pin<&mut Self>) {
         let n = self.rows.len() as i32;
@@ -278,9 +300,22 @@ impl qobject::QueueModel {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile;
+    use super::{reconcile, row_of};
+    use crate::models::queue::QueueRow;
     use crate::models::{apply, Change};
+    use serde_json::json;
     use std::collections::VecDeque;
+
+    #[test]
+    fn a_row_menu_finds_its_song_again_or_nothing() {
+        let rows: Vec<QueueRow> = ["a", "b", "c", "b"].iter().map(|v| QueueRow::from_value(&json!({"videoId": v}))).collect();
+        assert_eq!(row_of(&rows, 2, "c"), Some(2), "still there");
+        assert_eq!(row_of(&rows, 0, "c"), Some(2), "moved");
+        assert_eq!(row_of(&rows, 3, "b"), Some(3), "a duplicate: the row it was opened on");
+        assert_eq!(row_of(&rows, 2, "b"), Some(1), "a duplicate elsewhere: the nearest");
+        assert_eq!(row_of(&rows, 1, "z"), None, "no longer queued (a new album replaced the queue)");
+        assert_eq!(row_of(&rows, 1, ""), None);
+    }
 
     /// The model's list after its own moves and what the Player published, next to the Player's own list.
     fn run(start: &[char], local: &[(usize, usize)], player_first: Option<Change<char>>) -> (Vec<char>, Vec<char>) {

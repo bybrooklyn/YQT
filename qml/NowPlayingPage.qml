@@ -72,10 +72,13 @@ Kirigami.Page {
         id: rowMenu
         property int row: -1
         property var song: ({})
+        // The row the song is on now (-1: gone). The queue can change under an open menu, e.g. a few moments after
+        // "Play album" replaces it, and the old row number would then act on a different song.
+        function songRow() { return QueueModel.rowOf(row, song.videoId || "") }
         property string dl: "none"
         property bool liked: false
         onAboutToShow: { dl = Downloads.state(song.videoId); liked = Backend.isLiked(song.videoId) }
-        QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: Player.playIndex(rowMenu.row) }
+        QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play"); onTriggered: { const r = rowMenu.songRow(); if (r >= 0) Player.playIndex(r) } }
         QQC2.MenuItem {
             text: rowMenu.dl === "downloaded" ? qsTr("Remove download") : (rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? qsTr("Cancel download") : (rowMenu.dl === "failed" ? qsTr("Retry download") : qsTr("Download")))
             icon.name: rowMenu.dl === "downloaded" || rowMenu.dl === "queued" || rowMenu.dl === "downloading" ? "edit-delete" : "download"
@@ -85,7 +88,7 @@ Kirigami.Page {
                 else Downloads.remove(rowMenu.song.videoId)
             }
         }
-        QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: rowMenu.row !== Player.index; onTriggered: QueueModel.playRowNext(rowMenu.row) }
+        QQC2.MenuItem { icon.name: "go-next"; text: qsTr("Play next"); enabled: rowMenu.row !== Player.index; onTriggered: { const r = rowMenu.songRow(); if (r >= 0) QueueModel.playRowNext(r) } }
         QQC2.MenuSeparator {}
         QQC2.MenuItem { icon.name: "user"; text: qsTr("Go to artist"); visible: !!rowMenu.song.artistId; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().open({kind: "artist", browseId: rowMenu.song.artistId, title: rowMenu.song.artist}) }
         QQC2.MenuItem { icon.name: "media-playback-start"; text: qsTr("Play album"); visible: !!rowMenu.song.albumId; height: visible ? implicitHeight : 0; onTriggered: Player.playAlbum(JSON.stringify(rowMenu.song)) }
@@ -98,7 +101,7 @@ Kirigami.Page {
         }
         QQC2.MenuItem { icon.name: "list-add"; text: qsTr("Add to playlist…"); visible: Backend.loggedIn; height: visible ? implicitHeight : 0; onTriggered: applicationWindow().addToPlaylist({videoId: rowMenu.song.videoId, title: rowMenu.song.title}) }
         QQC2.MenuSeparator {}
-        QQC2.MenuItem { icon.name: "list-remove"; text: qsTr("Remove from queue"); onTriggered: QueueModel.removeRow(rowMenu.row) }
+        QQC2.MenuItem { icon.name: "list-remove"; text: qsTr("Remove from queue"); onTriggered: { const r = rowMenu.songRow(); if (r >= 0) QueueModel.removeRow(r) } }
     }
 
     GridLayout {
