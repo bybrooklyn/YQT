@@ -121,16 +121,54 @@ pub fn lru_victims(entries: &[Entry], cap: u64) -> Vec<String> {
     out
 }
 
+/// A cover's "last used" time (its mtime) is only renewed when it is older than this. Marking a cover used costs an
+/// open-for-write, and `Covers.url` runs on the UI thread for every cover binding; the LRU does not need the time
+/// any finer than this.
+const TOUCH_AFTER: Duration = Duration::from_secs(3600);
+/// Read the whole folder again at least this often even while the running total says the cache fits (it may have
+/// been changed from outside, or a put may have replaced a file and been counted twice).
+const PRUNE_AT_LEAST_EVERY: Duration = Duration::from_secs(600);
+
+/// When `put` must trim the cache. Reading the whole folder on every put was most of the cost of a long list's
+/// covers arriving; instead the bytes put since the last trim are added to the total it left, and the folder is
+/// only read again once that could exceed the cap (so the cap holds as before), or after a while.
+#[derive(Debug, Default)]
+struct PruneState {
+    /// The bytes in the cache after the last trim plus everything put since; `None` before the first trim.
+    total: Option<u64>,
+    last: Option<Instant>,
+}
+
+impl PruneState {
+    /// Count `added` bytes; true when the cache must be trimmed now.
+    fn should_prune(&mut self, added: u64, cap: u64, now: Instant) -> bool {
+        let due = self.last.is_none_or(|t| now.duration_since(t) >= PRUNE_AT_LEAST_EVERY);
+        match self.total {
+            Some(t) if !due && t.saturating_add(added) <= cap => {
+                self.total = Some(t + added);
+                false
+            }
+            _ => true,
+        }
+    }
+    fn pruned(&mut self, remaining: u64, now: Instant) {
+        (self.total, self.last) = (Some(remaining), Some(now));
+    }
+}
+
 // ---- the on-disk cache -------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Cache {
     dir: PathBuf,
     cap: u64,
+    /// Shared by the clones that `fetch_into` hands to its blocking tasks.
+    prune: std::sync::Arc<Mutex<PruneState>>,
 }
 
 impl Cache {
     pub fn new(dir: PathBuf, cap: u64) -> Cache {
-        Cache { dir, cap }
+        Cache { dir, cap, prune: Default::default() }
     }
 
     pub fn path_of(&self, hash: &str) -> Option<PathBuf> {
@@ -150,6 +188,21 @@ impl Cache {
         }
     }
 
+    /// [`has`](Self::has), and if so mark it used unless that was done within the last [`TOUCH_AFTER`]: one stat
+    /// for a cover in use, where `has` + `touch` cost a stat, an open and a write of the time on every call.
+    pub fn use_if_cached(&self, hash: &str) -> bool {
+        let Some(p) = self.path_of(hash) else { return false };
+        let Ok(meta) = std::fs::symlink_metadata(&p) else { return false };
+        if !meta.is_file() {
+            return false;
+        }
+        let stale = meta.modified().ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age >= TOUCH_AFTER);
+        if stale {
+            self.touch(hash);
+        }
+        true
+    }
+
     pub fn read(&self, hash: &str) -> Option<Vec<u8>> {
         let p = self.path_of(hash)?;
         let meta = std::fs::symlink_metadata(&p).ok()?;
@@ -166,7 +219,12 @@ impl Cache {
         let hash = hash_url(url);
         let path = self.dir.join(&hash);
         write_private(&path, bytes).map_err(|e| CoverError::Io(e.to_string()))?;
-        self.prune();
+        // (held while trimming, so two puts never read and trim the folder at the same time)
+        let mut state = self.prune.lock().unwrap_or_else(|e| e.into_inner());
+        if state.should_prune(bytes.len() as u64, self.cap, Instant::now()) {
+            let remaining = self.prune();
+            state.pruned(remaining, Instant::now());
+        }
         Ok(hash)
     }
 
@@ -189,11 +247,15 @@ impl Cache {
         self.entries().iter().map(|e| e.size).sum()
     }
 
-    /// Delete least-recently-used files until the cache fits its cap.
-    pub fn prune(&self) {
-        for name in lru_victims(&self.entries(), self.cap) {
-            let _ = std::fs::remove_file(self.dir.join(name));
+    /// Delete least-recently-used files until the cache fits its cap. Returns the bytes left.
+    pub fn prune(&self) -> u64 {
+        let entries = self.entries();
+        let mut total: u64 = entries.iter().map(|e| e.size).sum();
+        for name in lru_victims(&entries, self.cap) {
+            let _ = std::fs::remove_file(self.dir.join(&name));
+            total -= entries.iter().find(|e| e.name == name).map_or(0, |e| e.size);
         }
+        total
     }
 
     #[allow(dead_code)] // Settings → Storage ("clear covers")
@@ -233,9 +295,9 @@ pub async fn fetch_into(cache: &Cache, client: &reqwest::Client, url: &str) -> R
         return Err(CoverError::NotFetchable);
     }
     let bytes = download_limited(client, url, MAX_ITEM_BYTES, true).await?;
-    let (url, cache_dir, cap) = (url.to_owned(), cache.dir.clone(), cache.cap);
+    let (url, cache) = (url.to_owned(), cache.clone());
     // decoding is CPU work: keep it off the async workers
-    tokio::task::spawn_blocking(move || Cache::new(cache_dir, cap).put(&url, &bytes)).await.map_err(|e| CoverError::Io(e.to_string()))?
+    tokio::task::spawn_blocking(move || cache.put(&url, &bytes)).await.map_err(|e| CoverError::Io(e.to_string()))?
 }
 
 // ---- the process-wide cache + QML --------------------------------------------------------------
@@ -327,8 +389,7 @@ pub fn resolve(source: &str) -> String {
         return source.to_owned(); // already local, a file, qrc:, empty …
     }
     let hash = hash_url(source);
-    if global().has(&hash) {
-        global().touch(&hash);
+    if global().use_if_cached(&hash) {
         return crate::proxy::cover_url(&hash);
     }
     prefetch(source);
@@ -350,7 +411,7 @@ pub async fn load(source: &str) -> Option<Vec<u8>> {
         return None;
     };
     let cache = global();
-    cache.touch(&hash);
+    cache.use_if_cached(&hash);
     tokio::task::spawn_blocking(move || cache.read(&hash)).await.ok().flatten()
 }
 
@@ -547,6 +608,40 @@ mod tests {
         assert!(c.total_bytes() <= (one.len() as u64) * 2 + 10);
         c.clear();
         assert_eq!(c.total_bytes(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_folder_is_only_read_again_when_the_cap_could_be_exceeded_or_after_a_while() {
+        let t0 = Instant::now();
+        let mut s = PruneState::default();
+        assert!(s.should_prune(10, 100, t0), "the first put trims (nothing is known yet)");
+        s.pruned(50, t0);
+        assert!(!s.should_prune(20, 100, t0), "70 of 100");
+        assert!(!s.should_prune(30, 100, t0), "exactly 100 of 100 still fits");
+        assert!(s.should_prune(1, 100, t0), "101 could exceed the cap");
+        s.pruned(60, t0);
+        assert!(!s.should_prune(1, 100, t0 + Duration::from_secs(5)));
+        assert!(s.should_prune(1, 100, t0 + PRUNE_AT_LEAST_EVERY), "and again after a while regardless");
+    }
+
+    #[test]
+    fn a_cover_in_use_is_marked_used_at_most_once_an_hour() {
+        let dir = tmpdir("touch");
+        let c = Cache::new(dir.clone(), 1 << 20);
+        let h = c.put("https://x.com/t.png", &encode(ImageFormat::Png, 4, 4, [1, 1, 1])).unwrap();
+        let path = dir.join(&h);
+        let mtime = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let old = SystemTime::now() - Duration::from_secs(2 * 3600);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        assert!(c.use_if_cached(&h));
+        let renewed = mtime();
+        assert!(renewed > old + Duration::from_secs(3600), "an old last-use time is renewed");
+        let recent = SystemTime::now() - Duration::from_secs(60);
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap().set_modified(recent).unwrap();
+        assert!(c.use_if_cached(&h));
+        assert_eq!(mtime(), recent, "a recent one is left alone");
+        assert!(!c.use_if_cached(&hash_url("https://x.com/none")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

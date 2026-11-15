@@ -318,7 +318,7 @@ async fn serve_cover(
     if mime == "application/octet-stream" {
         return reply(sock, "404 Not Found").await; // never serve something that is not an image
     }
-    cache.touch(hash);
+    cache.use_if_cached(hash);
     serve_file(sock, &path, mime, method, range, true).await
 }
 
