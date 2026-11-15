@@ -134,7 +134,7 @@ pub struct PlayerRust {
     generation: u64,
     radio_busy: bool,
     radio_wanted: bool, // the queue grew from one song ("play this"), so a radio belongs after it
-    retried: u64,       // generation that already had one automatic retry
+    retries: Retries,   // automatic retries after a failed stream
     playing: bool,      // what QML last reported through `sync_mpris`
     hold_saves: bool,   // a restore / in-place reload is running: the session file stays as it is
     /// (generation, ms): the last position QML reported for the track loaded in that generation
@@ -169,7 +169,7 @@ impl Default for PlayerRust {
             generation: 0,
             radio_busy: false,
             radio_wanted: false,
-            retried: u64::MAX,
+            retries: Retries::default(),
             playing: false,
             hold_saves: false,
             last_pos: None,
@@ -283,6 +283,42 @@ fn cached_url(cache: &mut Cache, id: &str, max_age: Duration, registered: impl F
     }
     cache.remove(id);
     None
+}
+
+/// Automatic retries of the playing track after its stream failed (see `media_failed`). The first failure of a load
+/// is always retried. A failure of a retried load is retried again only when that load demonstrably played on (its
+/// position got `RETRY_PLAYED_MS` past where it resumed), and at most `MAX_RETRIES` times in all for the track: a long
+/// song may break off more than once, but a track that fails at once must end in an error, not in a loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Retries {
+    generation: u64, // the load that was the latest retry (u64::MAX: none)
+    count: u32,      // retries of that track so far
+    from_ms: i64,    // where that retry resumed
+}
+
+const MAX_RETRIES: u32 = 3;
+const RETRY_PLAYED_MS: i64 = 5_000;
+
+impl Default for Retries {
+    fn default() -> Self {
+        Self { generation: u64::MAX, count: 0, from_ms: 0 }
+    }
+}
+
+impl Retries {
+    /// May the load `generation`, which just failed, be retried? `pos` is the last position it reported, if any.
+    fn allow(&self, generation: u64, pos: Option<i64>) -> bool {
+        if generation != self.generation {
+            return true; // not a retry: its first failure
+        }
+        self.count < MAX_RETRIES && pos.is_some_and(|ms| ms >= self.from_ms + RETRY_PLAYED_MS)
+    }
+
+    /// The failed load `failed` was retried as load `generation`, resuming at `from_ms`.
+    fn started(&mut self, failed: u64, generation: u64, from_ms: i64) {
+        let count = if failed == self.generation { self.count + 1 } else { 1 };
+        *self = Self { generation, count, from_ms };
+    }
 }
 
 /// What the user sees when neither stream route worked. The raw second error is usually an internal extraction
@@ -738,14 +774,15 @@ impl qobject::Player {
         let cur = *self.index();
         let generation = self.rust().generation;
         let Some(item) = (cur >= 0).then(|| self.rust().state.get(cur as usize).cloned()).flatten() else { return };
-        if self.rust().retried != generation {
-            // Stream URLs can expire or get cut off: fetch a fresh one once.
+        // the last position of this very load (still this track: same generation)
+        let last_pos = self.rust().last_pos.filter(|&(g, _)| g == generation).map(|(_, ms)| ms);
+        if self.rust().retries.allow(generation, last_pos) {
+            // Stream URLs can expire or get cut off: fetch a fresh one (see `Retries` for how often).
             let (autoplay, mut resume_pos) = (*self.autoplay(), *self.resume_pos());
             if resume_pos <= 0 {
-                // It broke mid-song: go on from about where it was, not from 0:00 (still this very track: same generation).
-                resume_pos = self.rust().last_pos.filter(|&(g, _)| g == generation).map_or(0, |(_, ms)| ms);
+                // It broke mid-song: go on from about where it was, not from 0:00.
+                resume_pos = last_pos.unwrap_or(0);
             }
-            self.as_mut().st_mut().retried = generation;
             forget(&s(&item, "videoId"));
             // the same track again: keep where a restored session wanted to resume, and what the file says
             self.as_mut().st_mut().hold_saves = true;
@@ -753,9 +790,9 @@ impl qobject::Player {
             self.as_mut().st_mut().hold_saves = false;
             self.as_mut().set_resume_pos(resume_pos);
             self.as_mut().set_autoplay(autoplay);
-            // load() bumped the generation; remember that this one was already a retry.
+            // load() bumped the generation; remember that this one is a retry, and where it resumed.
             let g = self.rust().generation;
-            self.as_mut().st_mut().retried = g;
+            self.as_mut().st_mut().retries.started(generation, g, resume_pos);
         } else {
             self.as_mut().set_loading(false);
             self.set_error(QString::from(&format!("Playback failed: {message}")));
@@ -981,6 +1018,49 @@ mod play_album_tests {
         println!("album has {} songs; the song is at {:?}", tracks.len(), tracks.iter().position(|t| same_song(t, &song)));
         assert!(!tracks.is_empty());
         assert!(tracks.iter().any(|t| same_song(t, &song)), "the song is listed in the album it names");
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::{Retries, MAX_RETRIES, RETRY_PLAYED_MS};
+
+    #[test]
+    fn the_first_failure_of_a_load_is_retried_and_a_retry_that_fails_at_once_is_not() {
+        let mut r = Retries::default();
+        assert!(r.allow(1, None), "a track that never played still gets one fresh URL");
+        r.started(1, 2, 0);
+        assert!(!r.allow(2, None), "the retry failed before it played");
+        assert!(!r.allow(2, Some(RETRY_PLAYED_MS - 1)), "it barely played: no loop on a track that keeps failing");
+    }
+
+    #[test]
+    fn a_retry_that_played_on_may_be_retried_again_up_to_the_cap() {
+        let mut r = Retries::default();
+        // broke off at 1:00, picked up there
+        assert!(r.allow(10, Some(60_000)));
+        r.started(10, 11, 60_000);
+        assert!(!r.allow(11, Some(60_000 + RETRY_PLAYED_MS - 1)), "progress is counted from where the retry resumed");
+        assert!(r.allow(11, Some(60_000 + RETRY_PLAYED_MS)), "it played on, then broke off again");
+        r.started(11, 12, 90_000);
+        assert!(r.allow(12, Some(120_000)));
+        r.started(12, 13, 120_000);
+        assert_eq!(r.count, MAX_RETRIES);
+        assert!(!r.allow(13, Some(200_000)), "at most {MAX_RETRIES} retries per track");
+    }
+
+    #[test]
+    fn another_load_starts_over() {
+        let mut r = Retries::default();
+        for (failed, g) in [(1, 2), (2, 3), (3, 4)] {
+            r.started(failed, g, 0);
+        }
+        assert!(!r.allow(4, Some(1_000_000)));
+        // the user (or the queue) loads a track: a new generation that is not a retry
+        assert!(r.allow(7, None), "a fresh load gets its own retries");
+        r.started(7, 8, 0);
+        assert_eq!(r.count, 1, "counted from one again");
+        assert!(!r.allow(8, None));
     }
 }
 
