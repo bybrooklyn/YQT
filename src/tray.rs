@@ -16,6 +16,8 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::QString;
 #[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
 /// What an entry does when activated (`entryId` in QML).
@@ -122,13 +124,25 @@ mod sni {
     pub struct SniTray {
         pub entries: Vec<MenuEntry>,
         pub tooltip: String,
+        /// Which push the menu and tooltip came from (0: the ones the tray was built with).
+        seq: u64,
         on_action: OnAction,
         icons: Vec<ksni::Icon>,
     }
 
     impl SniTray {
         pub fn new(entries: Vec<MenuEntry>, tooltip: String, on_action: OnAction) -> Self {
-            Self { entries, tooltip, on_action, icons: icons() }
+            Self { entries, tooltip, seq: 0, on_action, icons: icons() }
+        }
+
+        /// Take the menu and tooltip of push number `seq`, unless a later push already arrived. Each push runs on
+        /// its own task, so they can reach the tray out of order; this keeps an older one from undoing a newer one.
+        pub fn apply(&mut self, seq: u64, entries: Vec<MenuEntry>, tooltip: String) {
+            if seq > self.seq {
+                self.seq = seq;
+                self.entries = entries;
+                self.tooltip = tooltip;
+            }
         }
     }
 
@@ -195,6 +209,18 @@ mod sni {
         use crate::tray::{tray_menu, TrayState};
         use ksni::Tray;
         use std::sync::Mutex;
+
+        #[test]
+        fn an_older_push_arriving_late_never_overwrites_a_newer_one() {
+            let mut tray = SniTray::new(Vec::new(), "start".into(), Arc::new(|_| {}));
+            let paused = tray_menu(&TrayState { has_track: true, ..Default::default() });
+            let playing = tray_menu(&TrayState { has_track: true, playing: true, ..Default::default() });
+            tray.apply(2, playing.clone(), "Song B".into());
+            tray.apply(1, paused, "Song A".into()); // the earlier push, overtaken on the way
+            assert_eq!((tray.entries.clone(), tray.tooltip.as_str()), (playing, "Song B"));
+            tray.apply(3, Vec::new(), "YQT".into());
+            assert_eq!(tray.tooltip, "YQT");
+        }
 
         #[test]
         fn argb_reorders_channels() {
@@ -365,6 +391,9 @@ pub struct TrayMenuModelRust {
     /// The running tray, once the D-Bus registration succeeded (shared with the task that creates it).
     #[cfg(target_os = "linux")]
     handle: Arc<Mutex<Option<Arc<ksni::Handle<sni::SniTray>>>>>,
+    /// How many menu/tooltip pushes were sent to the tray (each carries its number; see `SniTray::apply`).
+    #[cfg(target_os = "linux")]
+    pushes: AtomicU64,
 }
 
 impl qobject::TrayMenuModel {
@@ -437,13 +466,9 @@ impl qobject::TrayMenuModel {
         let running = self.rust().handle.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(handle) = running {
             let (entries, tip) = (self.rust().entries.clone(), self.rust().tooltip.clone());
+            let seq = self.rust().pushes.fetch_add(1, Ordering::Relaxed) + 1;
             crate::state::st().rt.spawn(async move {
-                let _ = handle
-                    .update(move |t| {
-                        t.entries = entries;
-                        t.tooltip = tip;
-                    })
-                    .await;
+                let _ = handle.update(move |t| t.apply(seq, entries, tip)).await;
             });
         }
     }
