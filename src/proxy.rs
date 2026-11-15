@@ -138,7 +138,16 @@ fn serve(l: std::net::TcpListener, ctx: Arc<Ctx>, client: reqwest::Client, rt: &
         let l = TcpListener::from_std(l).expect("proxy listener");
         // A player opens a handful of connections; a local process opening thousands must not exhaust our descriptors.
         let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-        while let Ok((sock, _)) = l.accept().await {
+        loop {
+            let sock = match l.accept().await {
+                Ok((sock, _)) => sock,
+                Err(e) => {
+                    // out of descriptors or a client that reset before we accepted: not a reason to stop serving for good
+                    tracing::warn!("proxy accept failed: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
             let Ok(permit) = slots.clone().try_acquire_owned() else { continue }; // over the limit: close it at once
             let (client, ctx) = (client.clone(), ctx.clone());
             tokio::spawn(async move {

@@ -609,6 +609,7 @@ fn feeder(mut core: Core, rx: Receiver<Cmd>, tx: Sender<Cmd>, shared: Arc<Shared
                     // the previous track is gone for good: if this one fails to open, `play`/`seek` must not bring it back
                     core.last_url = None;
                     shared.idle.store(false, Ordering::Relaxed);
+                    shared.loading.store(true, Ordering::Relaxed); // a stale `Opened` may have cleared it since `load()` set it
                     spawn_open(tx.clone(), url, rate, load_token, false);
                 }
                 Cmd::Opened { token, url, result } => {

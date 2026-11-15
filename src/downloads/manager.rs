@@ -237,12 +237,13 @@ pub async fn fetch_to_file(
         }
         let before = have;
         while let Some(bytes) = resp.chunk().await.map_err(net)? {
-            file.write_all(&bytes).await.map_err(io)?;
-            have += bytes.len() as u64;
-            on_progress(have, total.unwrap_or(0));
+            // checked before the write: a cancelled job must not append to a .part that a re-queued job now resumes
             if cancelled.load(Ordering::Relaxed) {
                 return Err(DlError::Cancelled);
             }
+            file.write_all(&bytes).await.map_err(io)?;
+            have += bytes.len() as u64;
+            on_progress(have, total.unwrap_or(0));
         }
         if have == before {
             return Err(DlError::Incomplete); // an empty body would loop forever
