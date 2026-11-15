@@ -553,14 +553,21 @@ impl Drop for Engine {
 }
 
 /// The stream proxy's own URL for a song, split into what comes before the id (address and token) and the video id:
-/// `http://127.0.0.1:<port>/t/<token>/<id>` (streamed) or `http://127.0.0.1:<port>/t/<token>/dl/<id>` (downloaded).
+/// `http://127.0.0.1:<port>/t/<token>/<id>` (streamed) or `http://127.0.0.1:<port>/t/<token>/dl/<id>` (downloaded),
+/// and without a token (`security.proxy_token = false`) `http://127.0.0.1:<port>/<id>` or `.../dl/<id>`. Without the
+/// token to anchor it, only a real 11-character video id counts (a download always has one).
 fn proxy_track(url: &str) -> Option<(&str, &str)> {
     let (port, path) = url.strip_prefix("http://127.0.0.1:")?.split_once('/')?;
-    let (token, tail) = path.strip_prefix("t/")?.split_once('/')?;
+    let (token_ok, tail, len_ok): (bool, &str, fn(usize) -> bool) = match path.strip_prefix("t/") {
+        Some(rest) => {
+            let (token, tail) = rest.split_once('/')?;
+            (!token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric()), tail, |n| (1..=64).contains(&n))
+        }
+        None => (true, path, |n| n == 11),
+    };
     let id = tail.strip_prefix("dl/").unwrap_or(tail);
     let port_ok = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
-    let token_ok = !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric());
-    let id_ok = (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    let id_ok = len_ok(id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     (port_ok && token_ok && id_ok).then(|| (&url[..url.len() - tail.len()], id))
 }
 
@@ -1003,6 +1010,46 @@ mod tests {
         assert!(!same_track("http://127.0.0.1:4242/t/ab12/dl/dl/x", "http://127.0.0.1:4242/t/ab12/dl/x"), "no such shape");
         assert!(!same_track("http://127.0.0.1:4242/t/ab12/a?b", "http://127.0.0.1:4242/t/ab12/dl/a?b"), "ids are checked");
         assert!(same_track("/some/file.webm", "/some/file.webm") && !same_track("/a.webm", "/b.webm"), "anything else: exactly");
+    }
+
+    /// The same without the token segment (`security.proxy_token = false`): `/<id>` and `/dl/<id>`.
+    #[test]
+    fn the_stream_and_the_download_of_a_song_are_the_same_track_without_a_token() {
+        let (stream, dl) = ("http://127.0.0.1:4242/dQw4w9WgXcQ", "http://127.0.0.1:4242/dl/dQw4w9WgXcQ");
+        assert!(same_track(stream, dl) && same_track(dl, stream) && same_track(dl, dl));
+        assert!(!same_track(stream, "http://127.0.0.1:4242/dl/otherSong01"), "another song");
+        assert!(!same_track(stream, "http://127.0.0.1:4243/dl/dQw4w9WgXcQ"), "another proxy");
+        assert!(!same_track(stream, "http://127.0.0.1:4242/t/ab12/dl/dQw4w9WgXcQ"), "the proxy with a token is another proxy");
+        assert!(!same_track(stream, "http://127.0.0.1:4242/cover/dQw4w9WgXcQ"), "not a song URL");
+        assert!(!same_track("http://example.invalid/dQw4w9WgXcQ", "http://example.invalid/dl/dQw4w9WgXcQ"), "not the proxy");
+        assert!(!same_track("http://localhost:4242/dQw4w9WgXcQ", "http://localhost:4242/dl/dQw4w9WgXcQ"), "not the proxy's URL");
+        assert!(!same_track("http://127.0.0.1:/dQw4w9WgXcQ", "http://127.0.0.1:/dl/dQw4w9WgXcQ"), "no port");
+        assert!(!same_track("http://127.0.0.1:4242/dl/dl/dQw4w9WgXcQ", dl), "no such shape");
+        assert!(!same_track("http://127.0.0.1:4242/sine880", "http://127.0.0.1:4242/dl/sine880"), "not an 11-char video id");
+        assert!(!same_track("http://127.0.0.1:4242/dQw4w9WgXcQ1", "http://127.0.0.1:4242/dl/dQw4w9WgXcQ1"), "too long");
+        assert!(!same_track("http://127.0.0.1:4242/dQw4w9W?XcQ", "http://127.0.0.1:4242/dl/dQw4w9W?XcQ"), "ids are checked");
+        assert!(!same_track("http://127.0.0.1:4242/a/dQw4w9WgXcQ", "http://127.0.0.1:4242/dl/dQw4w9WgXcQ"), "an unknown path");
+    }
+
+    /// Without a token, too: asking for the downloaded copy of the incoming track does not restart the fade.
+    #[test]
+    fn asking_for_the_tokenless_downloaded_copy_of_the_incoming_track_does_not_restart_the_fade() {
+        let (a, b) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"));
+        let (b_stream, b_dl) = ("http://127.0.0.1:4242/sine880Abcd", "http://127.0.0.1:4242/dl/sine880Abcd");
+        let (mut core, mut dsp, _ring, _ev_rx) = rig(1000);
+        core.load_now(TrackStream::open_url(&a, 48_000).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, 48_000).unwrap(), b_stream.to_owned())));
+        let mut block = vec![0f32; 2 * 1024];
+        for _ in 0..2000 {
+            if core.fade.is_some() {
+                break;
+            }
+            core.pump(12_000);
+            dsp.render(&mut block);
+        }
+        assert!(core.fade.is_some(), "the fade never started");
+        assert!(core.is_playing_url(b_dl), "the downloaded copy of the incoming track");
+        assert!(!core.is_playing_url("http://127.0.0.1:4242/dl/chirpAbcdef"), "another song is still a real load");
     }
 
     /// A download that finishes while the incoming track fades in changes the URL the UI asks for: still that track.
