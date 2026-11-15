@@ -1059,16 +1059,20 @@ pub(crate) async fn browse(target: String) -> Res {
                 return Ok(v);
             }
             let id = id.trim_start_matches("VL");
-            let p = match with_retry(|| q.music_playlist(id)).await {
+            // Signed in, a playlist is read with the session (and so are its further pages): the account's own
+            // private playlists exist only for it. A refusal then reaches `finish` as one, which checks the session.
+            let signed_in = LOGGED.load(Ordering::Relaxed);
+            let pq = if signed_in { authed() } else { q };
+            let p = match with_retry(|| pq.music_playlist(id)).await {
                 Ok(p) => p,
                 // The account's own mixes on the home feed ("My Supermix" …) have no playlist page to read: they are
                 // radios, and only the account they were mixed for gets them.
-                Err(e) if LOGGED.load(Ordering::Relaxed) && id.starts_with("RD") => {
-                    let mix = authed().music_radio_playlist(id).await.map_err(|_| err(e))?;
+                Err(e) if signed_in && id.starts_with("RD") => {
+                    let mix = authed().music_radio_playlist(id).await.map_err(|_| err_authed(e))?;
                     // no title of its own: the page keeps the name of the card it was opened from
                     return Ok(paged("", "", "", Pager::Tracks(mix, "".into(), "".into()), true));
                 }
-                Err(e) => return Err(err(e)),
+                Err(e) => return Err(err_for(signed_in, e)),
             };
             let cover = thumb(&p.thumbnail);
             let by = p.channel.as_ref().map(|c| c.name.as_str()).unwrap_or("");
@@ -1079,7 +1083,7 @@ pub(crate) async fn browse(target: String) -> Res {
             let pd = crate::pages::playlist::build(&p);
             let name = p.name.clone();
             Ok(with_page_data(
-                paged(&name, sub.trim_start_matches(" • "), &cover, Pager::Tracks(p.tracks, "".into(), cover.clone()), false),
+                paged(&name, sub.trim_start_matches(" • "), &cover, Pager::Tracks(p.tracks, "".into(), cover.clone()), signed_in),
                 &pd,
             ))
         }

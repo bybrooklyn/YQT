@@ -11,15 +11,30 @@ use crate::state::st;
 use rustypipe::model::MusicPlaylist;
 
 pub async fn load(id: &str) -> Result<PageData, AppError> {
-    let q = st().rp.query();
-    let playlist = super::retry(|| q.music_playlist(id.trim_start_matches("VL"))).await?;
+    let (playlist, authenticated) = fetch(id.trim_start_matches("VL")).await?;
     let mut page = build(&playlist);
     if page.has_more {
         let cover = thumb(&playlist.thumbnail);
         let shown = playlist.tracks.items.len();
-        page.pager = Some(super::register_tracks(playlist.tracks, cover, shown));
+        page.pager = Some(super::register_tracks(playlist.tracks, cover, shown, authenticated));
     }
     Ok(page)
+}
+
+/// The playlist, and whether it was read with the session. Signed in, it is: the account's own private playlists
+/// exist only for it. If the session is refused, a public playlist still opens without it, as it always did; a
+/// private one then fails with the session's error, not "doesn't exist".
+async fn fetch(id: &str) -> Result<(MusicPlaylist, bool), AppError> {
+    let q = st().rp.query();
+    if !crate::backend::is_logged_in() {
+        return super::retry(|| q.music_playlist(id)).await.map(|p| (p, false));
+    }
+    let aq = st().rp.query().authenticated();
+    match super::retry_as(true, || aq.music_playlist(id)).await {
+        Ok(p) => Ok((p, true)),
+        Err(e) if super::session_trouble(&e) => super::retry(|| q.music_playlist(id)).await.map(|p| (p, false)).map_err(|_| e),
+        Err(e) => Err(e),
+    }
 }
 
 pub fn actions() -> Vec<Action> {

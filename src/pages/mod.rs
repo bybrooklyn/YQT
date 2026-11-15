@@ -51,7 +51,16 @@ fn slug(s: &str) -> String {
 }
 
 /// Run a RustyPipe request, and once more after a short pause if it failed in a transient way.
-async fn retry<T, F, Fut>(mut f: F) -> Result<T, AppError>
+async fn retry<T, F, Fut>(f: F) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, rustypipe::error::Error>>,
+{
+    retry_as(false, f).await
+}
+
+/// [`retry`] for a request made with (`authenticated`) or without the session: with it, a refusal means the session.
+async fn retry_as<T, F, Fut>(authenticated: bool, mut f: F) -> Result<T, AppError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, rustypipe::error::Error>>,
@@ -63,7 +72,13 @@ where
         }
         r => r,
     };
-    result.map_err(|e| AppError::from_rustypipe_request(&e, false, false))
+    result.map_err(|e| AppError::from_rustypipe_request(&e, authenticated, authenticated))
+}
+
+/// Did a request made with the session fail because of the session (refused, or the "sign in" page YouTube answers a
+/// stale one with)?
+fn session_trouble(e: &AppError) -> bool {
+    e.kind == ErrorKind::Auth || e.headline == crate::errors::SESSION_SUSPECT_MSG
 }
 
 // ---- continuation of track lists (playlists) ------------------------------------------------------------------
@@ -77,6 +92,8 @@ struct TrackCont {
     pager: Paginator<TrackItem>,
     cover: String,
     shown: usize,
+    /// The list was read with the session, so its further pages are too (an account's private playlist).
+    authenticated: bool,
 }
 
 static CONTS: Mutex<Option<HashMap<u32, TrackCont>>> = Mutex::new(None);
@@ -87,10 +104,10 @@ fn conts<R>(f: impl FnOnce(&mut HashMap<u32, TrackCont>) -> R) -> R {
 }
 
 /// Remember a partially loaded track list; the returned id goes in `PageData::pager`.
-pub(crate) fn register_tracks(pager: Paginator<TrackItem>, cover: String, shown: usize) -> u32 {
+pub(crate) fn register_tracks(pager: Paginator<TrackItem>, cover: String, shown: usize, authenticated: bool) -> u32 {
     let id = NEXT_CONT.fetch_add(1, Ordering::Relaxed) + 1;
     conts(|m| {
-        m.insert(id, TrackCont { pager, cover, shown });
+        m.insert(id, TrackCont { pager, cover, shown, authenticated });
         drop_oldest(m, MAX_CONTS);
     });
     id
@@ -115,9 +132,11 @@ pub fn forget(pager: u32) {
 
 async fn more_tracks(id: u32) -> Result<PageData, AppError> {
     let mut cont = conts(|m| m.remove(&id)).ok_or_else(|| AppError::new(ErrorKind::NotFound, "No more results", ""))?;
-    if let Err(e) = cont.pager.extend(&st().rp.query()).await {
+    let q = if cont.authenticated { st().rp.query().authenticated() } else { st().rp.query() };
+    if let Err(e) = cont.pager.extend(&q).await {
+        let authenticated = cont.authenticated;
         conts(|m| m.insert(id, cont)); // allow a retry
-        return Err(AppError::from_rustypipe_request(&e, false, false));
+        return Err(AppError::from_rustypipe_request(&e, authenticated, authenticated));
     }
     let new = common::numbered_tracks(cont.pager.items.get(cont.shown..).unwrap_or_default(), &cont.cover, cont.shown);
     cont.shown = cont.pager.items.len();
@@ -271,6 +290,17 @@ mod tests {
     }
 
     #[test]
+    fn a_signed_in_playlist_falls_back_only_when_the_session_is_the_problem() {
+        use rustypipe::error::{Error, ExtractionError};
+        let signed_in = |e: Error| AppError::from_rustypipe_request(&e, true, true);
+        assert!(session_trouble(&signed_in(Error::HttpStatus(403, "x".into()))), "refused");
+        assert!(session_trouble(&signed_in(Error::Extraction(ExtractionError::InvalidData("sign in".into())))), "a 'sign in' page");
+        assert!(!session_trouble(&signed_in(Error::HttpStatus(404, "x".into()))), "missing is missing, with or without it");
+        let anonymous = AppError::from_rustypipe_request(&Error::HttpStatus(403, "x".into()), false, false);
+        assert!(!session_trouble(&anonymous), "a refusal without the session says nothing about it");
+    }
+
+    #[test]
     fn slugs_are_stable_ids() {
         assert_eq!(slug("New albums & singles"), "new-albums-singles");
         assert_eq!(slug("  Top  songs "), "top-songs");
@@ -279,14 +309,14 @@ mod tests {
 
     #[test]
     fn our_pager_ids_never_collide_with_the_legacy_ones() {
-        let id = register_tracks(Paginator::default(), String::new(), 0);
+        let id = register_tracks(Paginator::default(), String::new(), 0, false);
         assert!(id > PAGER_BASE);
         assert!(conts(|m| m.remove(&id)).is_some());
     }
 
     #[test]
     fn remembered_lists_are_bounded_and_can_be_forgotten() {
-        let first = register_tracks(Paginator::default(), String::new(), 0);
+        let first = register_tracks(Paginator::default(), String::new(), 0, false);
         forget(first);
         assert!(conts(|m| !m.contains_key(&first)));
         // (on a map of its own: the shared one is used by the other tests at the same time)
