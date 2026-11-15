@@ -11,6 +11,7 @@ use core::pin::Pin;
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 
 const ROLE_BASE: i32 = 0x100; // Qt::UserRole
@@ -45,6 +46,26 @@ fn edit(f: impl FnOnce(&mut dyn QueueEditor) + Send + 'static) {
 static PENDING: Mutex<Option<Vec<QueueRow>>> = Mutex::new(None);
 static LIVE: Mutex<Option<cxx_qt::CxxQtThread<qobject::QueueModel>>> = Mutex::new(None);
 
+/// What the model must apply for a change the `Player` published, given the moves it already made on its own
+/// (`optimistic`, oldest first; see `QueueModel::move_row`).
+///
+/// The `Player` runs the model's edits in the order they were asked for and publishes each one, so normally the
+/// next change is the echo of the oldest optimistic move: it is already on screen and nothing is applied. Anything
+/// else means the `Player` changed the queue on its own first (a new album, radio rows). Then the optimistic moves
+/// are undone, newest first, and the change is applied to the list as the `Player` had it; the moves still on their
+/// way are then applied normally when they arrive, so the model ends up exactly where the `Player` is.
+fn reconcile<T>(optimistic: &mut VecDeque<(usize, usize)>, change: Change<T>) -> Vec<Change<T>> {
+    if let (Some(&expected), Change::Move { from, to }) = (optimistic.front(), &change) {
+        if expected == (*from, *to) {
+            optimistic.pop_front();
+            return Vec::new();
+        }
+    }
+    let mut out: Vec<Change<T>> = optimistic.drain(..).rev().map(|(from, to)| Change::Move { from: to, to: from }).collect();
+    out.push(change);
+    out
+}
+
 /// Called by the `Player` after every queue edit; `snapshot` is only used when the model is not alive yet.
 pub fn publish(change: Change<Value>, snapshot: impl FnOnce() -> Vec<Value>) {
     let rows_change = match change {
@@ -58,7 +79,9 @@ pub fn publish(change: Change<Value>, snapshot: impl FnOnce() -> Vec<Value>) {
     match live.as_ref() {
         Some(th) => {
             let _ = th.queue(move |mut m| {
-                crate::apply_to_model!(m, rows_change, &mut m.as_mut().rust_mut().get_mut().rows, [ROLE_BASE, ROLE_BASE + 1]);
+                for change in reconcile(&mut m.as_mut().rust_mut().get_mut().optimistic, rows_change) {
+                    crate::apply_to_model!(m, change, &mut m.as_mut().rust_mut().get_mut().rows, [ROLE_BASE, ROLE_BASE + 1]);
+                }
                 m.sync_count();
             });
         }
@@ -165,6 +188,8 @@ pub mod qobject {
 pub struct QueueModelRust {
     count: i32,
     rows: Vec<QueueRow>,
+    /// Moves already shown but not yet echoed back by the `Player` (see [`reconcile`]).
+    optimistic: VecDeque<(usize, usize)>,
 }
 
 impl cxx_qt::Initialize for qobject::QueueModel {
@@ -206,10 +231,25 @@ impl qobject::QueueModel {
         self.rows.len() as i32
     }
 
-    pub fn move_row(self: Pin<&mut Self>, from: i32, to: i32) {
-        if let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) {
-            edit(move |q| q.move_row(from, to));
+    /// The row moves at once, before the `Player` has done it: Kirigami's drag handle builds its next request from
+    /// the delegate's index, so a list that only caught up an event-loop turn later got the next step of a fast
+    /// drag applied to rows that had not moved yet (and moved the wrong song). The `Player`'s echo is then
+    /// skipped (see [`reconcile`]).
+    pub fn move_row(mut self: Pin<&mut Self>, from: i32, to: i32) {
+        let len = self.rows.len();
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else { return };
+        // The Player would refuse these too, and publish nothing; without a Player (harnesses) nothing would echo.
+        if from >= len || to >= len || from == to || EDITOR.lock().unwrap().is_none() {
+            return;
         }
+        crate::apply_to_model!(
+            self,
+            Change::<QueueRow>::Move { from, to },
+            &mut self.as_mut().rust_mut().get_mut().rows,
+            [ROLE_BASE, ROLE_BASE + 1]
+        );
+        self.as_mut().rust_mut().get_mut().optimistic.push_back((from, to));
+        edit(move |q| q.move_row(from, to));
     }
     pub fn remove_row(self: Pin<&mut Self>, at: i32) {
         if let Ok(at) = usize::try_from(at) {
@@ -232,6 +272,61 @@ impl qobject::QueueModel {
         let n = self.rows.len() as i32;
         if *self.count() != n {
             self.as_mut().set_count(n);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile;
+    use crate::models::{apply, Change};
+    use std::collections::VecDeque;
+
+    /// The model's list after its own moves and what the Player published, next to the Player's own list.
+    fn run(start: &[char], local: &[(usize, usize)], player_first: Option<Change<char>>) -> (Vec<char>, Vec<char>) {
+        let (mut model, mut player) = (start.to_vec(), start.to_vec());
+        let mut optimistic = VecDeque::new();
+        for &(from, to) in local {
+            apply(&mut model, &Change::Move { from, to });
+            optimistic.push_back((from, to));
+        }
+        // What the Player publishes, in order: its own change (if any), then each of the model's moves.
+        let mut published = Vec::new();
+        if let Some(c) = player_first {
+            apply(&mut player, &c);
+            published.push(c);
+        }
+        for &(from, to) in local {
+            let c = Change::Move { from, to };
+            apply(&mut player, &c);
+            published.push(c);
+        }
+        for c in published {
+            for c in reconcile(&mut optimistic, c) {
+                apply(&mut model, &c);
+            }
+        }
+        assert!(optimistic.is_empty());
+        (model, player)
+    }
+
+    #[test]
+    fn the_echo_of_a_fast_two_step_drag_changes_nothing() {
+        let (model, player) = run(&['A', 'B', 'C', 'D', 'E'], &[(1, 2), (2, 3)], None);
+        assert_eq!(model, ['A', 'C', 'D', 'B', 'E']);
+        assert_eq!(model, player);
+    }
+
+    #[test]
+    fn a_change_of_the_players_own_in_between_still_ends_in_step() {
+        for first in [
+            Change::Insert { at: 5, rows: vec!['F'] },
+            Change::Remove { at: 0, count: 1 },
+            Change::Move { from: 4, to: 0 },
+            Change::Reset(vec!['V', 'W', 'X', 'Y', 'Z']),
+        ] {
+            let (model, player) = run(&['A', 'B', 'C', 'D', 'E'], &[(1, 2), (2, 3)], Some(first.clone()));
+            assert_eq!(model, player, "after {first:?}");
         }
     }
 }
