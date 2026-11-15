@@ -34,6 +34,40 @@ pub fn parse_client_version(cache: &Value) -> Option<String> {
     ok.then(|| v.to_owned())
 }
 
+/// Which signed-in account and channel to act as: `X-Goog-AuthUser` (the Google account's session index) and, for a
+/// brand channel, `X-Goog-PageId`. RustyPipe reads both from the YouTube page when the session is stored and keeps
+/// them in its cache, so the calls here act as the same account and channel as Library/Liked do. Never log them.
+pub fn account_headers() -> Vec<(&'static str, String)> {
+    let cache = std::fs::read_to_string(crate::state::data_dir().join("rustypipe_cache.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .unwrap_or(Value::Null);
+    let (index, page_id) = parse_session_account(&cache);
+    let mut headers = vec![("X-Goog-AuthUser", index)];
+    if let Some(page_id) = page_id {
+        headers.push(("X-Goog-PageId", page_id));
+    }
+    headers
+}
+
+/// `auth_cookie.session_index` and `auth_cookie.channel_syncid` of RustyPipe's cache: the session index (`0` when
+/// missing or not a small number) and the brand channel's page id (only digits; `None` for the primary channel).
+pub fn parse_session_account(cache: &Value) -> (String, Option<String>) {
+    let auth = &cache["auth_cookie"];
+    let index = auth["session_index"]
+        .as_str()
+        .filter(|i| !i.is_empty() && i.len() <= 2 && i.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|i| i.parse::<u8>().ok())
+        .unwrap_or(0);
+    // (`account_syncid` is the name older RustyPipe versions stored it under.)
+    let page_id = auth["channel_syncid"]
+        .as_str()
+        .or_else(|| auth["account_syncid"].as_str())
+        .filter(|p| !p.is_empty() && p.len() <= 32 && p.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_owned);
+    (index.to_string(), page_id)
+}
+
 /// The configured YouTube Music address, but only if it really is a YouTube/Google host. The cookie, the signed
 /// Authorization header and the Origin are sent to it, so a config value pointing anywhere else must never be used.
 pub fn trusted_origin(configured: &str) -> Result<String, String> {
@@ -55,16 +89,17 @@ pub fn auth_headers() -> Result<Vec<(&'static str, String)>, String> {
     let sapisid = crate::auth::sapisid(&cookie).ok_or(AUTH_MSG)?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
     let auth = sapisid_hash(sapisid, ts, origin);
-    Ok(vec![
+    let mut headers = vec![
         ("Cookie", cookie),
         ("Authorization", auth),
         ("Origin", origin.to_owned()),
         ("X-Origin", origin.to_owned()),
-        ("X-Goog-AuthUser", "0".into()),
         ("X-YouTube-Client-Name", "67".into()),
         ("X-YouTube-Client-Version", version.to_owned()),
         ("User-Agent", USER_AGENT.into()),
-    ])
+    ];
+    headers.extend(account_headers());
+    Ok(headers)
 }
 
 fn web_remix_context() -> Value {
@@ -231,6 +266,27 @@ mod tests {
             parse_client_version(&json!({"clients": {"desktop_music": {"data": {"version": "1.2.3.4.5.6.7.8.9.10.11.12.13.14.15"}}}})),
             None
         );
+    }
+
+    #[test]
+    fn session_account_is_read_strictly() {
+        let account = |auth: Value| parse_session_account(&json!({ "auth_cookie": auth }));
+        // primary channel of the first account
+        assert_eq!(account(json!({"cookie": "x", "user_syncid": "123", "session_index": "0"})), ("0".into(), None));
+        // a brand channel of the second account
+        assert_eq!(
+            account(json!({"cookie": "x", "channel_syncid": "112233445566778899001", "session_index": "1"})),
+            ("1".into(), Some("112233445566778899001".into()))
+        );
+        assert_eq!(account(json!({"account_syncid": "42", "session_index": "3"})), ("3".into(), Some("42".into())));
+        // missing, empty, junk or absurd values: account 0, no page id
+        assert_eq!(parse_session_account(&json!({})), ("0".into(), None));
+        assert_eq!(parse_session_account(&Value::Null), ("0".into(), None));
+        assert_eq!(account(json!({"session_index": "", "channel_syncid": ""})), ("0".into(), None));
+        assert_eq!(account(json!({"session_index": "1\r\nX: y", "channel_syncid": "12\r\nX: y"})), ("0".into(), None));
+        assert_eq!(account(json!({"session_index": "-1", "channel_syncid": "abc_DEF"})), ("0".into(), None));
+        assert_eq!(account(json!({"session_index": "999", "channel_syncid": "1".repeat(40)})), ("0".into(), None));
+        assert_eq!(account(json!({"session_index": 1, "channel_syncid": 5})), ("0".into(), None));
     }
 
     #[test]

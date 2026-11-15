@@ -566,10 +566,10 @@ async fn player_response(client: &WebClient, video_id: &str, sts: u32, signed_in
         let cookie = crate::auth::stored_cookie().ok_or(AUTH_MSG)?;
         let sapisid = crate::auth::sapisid(&cookie).ok_or(AUTH_MSG)?;
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|e| e.to_string())?.as_secs();
-        req = req
-            .header("Authorization", crate::ytapi::sapisid_hash(sapisid, ts, origin))
-            .header("X-Goog-AuthUser", "0")
-            .header("Cookie", cookie);
+        req = req.header("Authorization", crate::ytapi::sapisid_hash(sapisid, ts, origin)).header("Cookie", cookie);
+        for (k, v) in crate::ytapi::account_headers() {
+            req = req.header(k, v);
+        }
     }
     let resp = req.json(&body).send().await.map_err(|e| e.without_url().to_string())?;
     match resp.status().as_u16() {
