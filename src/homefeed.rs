@@ -34,6 +34,12 @@ pub fn visitor(resp: &Value) -> &str {
     resp["responseContext"]["visitorData"].as_str().unwrap_or("")
 }
 
+/// The visitor id to ask for the page after `resp` with: the one `resp` answered with, since its token was made for
+/// that visitor; `prev` (the one the request went out with) if the answer names none.
+pub fn next_visitor(prev: &str, resp: &Value) -> String {
+    Some(visitor(resp)).filter(|v| !v.is_empty()).unwrap_or(prev).to_owned()
+}
+
 /// Whether YouTube says outright that it answered a signed-out visitor: the cookies were sent, but the session is no
 /// longer accepted. The feed is then the anonymous one. Unknown (the marker is missing) counts as signed in.
 pub fn answered_signed_out(resp: &Value) -> bool {
@@ -285,6 +291,8 @@ mod tests {
     fn the_visitor_id_is_read_from_the_answer() {
         assert_eq!(visitor(&json!({"responseContext": {"visitorData": "Cgt2aXNpdG9y"}})), "Cgt2aXNpdG9y");
         assert_eq!(visitor(&json!({})), "");
+        assert_eq!(next_visitor("old", &json!({"responseContext": {"visitorData": "new"}})), "new", "each answer's own");
+        assert_eq!(next_visitor("old", &json!({})), "old", "an answer without one keeps the one it was asked with");
     }
 
     #[test]

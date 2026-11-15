@@ -824,12 +824,14 @@ async fn home_feed_pages(mut each: impl FnMut(Vec<Value>)) -> Result<(), String>
         // The cookies were sent and YouTube no longer takes them: say so, rather than pass off the anonymous feed.
         return Err(AUTH_MSG.into());
     }
-    let visitor = crate::homefeed::visitor(&first).to_owned();
+    let mut visitor = crate::homefeed::visitor(&first).to_owned();
     let (items, mut next) = crate::homefeed::parse(&first);
     each(items);
     for _ in 0..HOME_FEED_MORE_PAGES {
         let Some(token) = next.take().filter(|_| !visitor.is_empty()) else { break };
         let Ok(resp) = crate::ytapi::home_feed(Some((&token, &visitor))).await else { break };
+        // a token is only good with the visitor of the answer it came from, which need not be the first one's
+        visitor = crate::homefeed::next_visitor(&visitor, &resp);
         let (more, after) = crate::homefeed::parse(&resp);
         each(more);
         next = after;
