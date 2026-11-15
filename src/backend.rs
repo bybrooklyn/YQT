@@ -1193,8 +1193,7 @@ fn session_after(check: Check, has_cookie: bool, renewed: impl FnOnce() -> bool)
 const REFRESHING_MSG: &str = "Refreshing your sign-in…";
 /// A refused request was told `REFRESHING_MSG`: whatever the check finds, its page must hear about it.
 static REFUSED_WAITING: AtomicBool = AtomicBool::new(false);
-static VERIFYING: AtomicBool = AtomicBool::new(false);
-static LAST_VERIFY: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static CHECKS: Mutex<Checks> = Mutex::new(Checks { running: false, rerun: false, last: None });
 /// A request refused for want of a session asks for a check; a burst of them (a page's rows) must not ask a dozen times.
 const VERIFY_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
 
@@ -1202,6 +1201,57 @@ const VERIFY_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
 /// again within `VERIFY_EVERY` of the last one.
 fn may_verify(last: Option<std::time::Instant>, now: std::time::Instant, forced: bool) -> bool {
     forced || last.is_none_or(|at| now.duration_since(at) >= VERIFY_EVERY)
+}
+
+/// The session checks: whether one runs, and whether a forced one was asked for while it did.
+struct Checks {
+    running: bool,
+    /// A forced check (a sign-in in Settings, typically) came in while one was running. That one may have started
+    /// before a sign-out and drop its answer, or have read the cookies before the new ones were stored: it is run
+    /// again, forced, once it is done, instead of the new sign-in going unchecked (and its likes unread).
+    rerun: bool,
+    last: Option<std::time::Instant>,
+}
+
+/// What became of asking for a check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// None ran: the caller starts one.
+    Start,
+    /// One is running; its answer (or that of the rerun it now owes) is on its way.
+    Running,
+    /// Too soon after the last one.
+    No,
+}
+
+impl Checks {
+    fn ask(&mut self, now: std::time::Instant, forced: bool) -> Ask {
+        if self.running {
+            self.rerun |= forced;
+            return Ask::Running;
+        }
+        if !may_verify(self.last, now, forced) {
+            return Ask::No;
+        }
+        self.running = true;
+        self.last = Some(now);
+        Ask::Start
+    }
+
+    /// The running check is done with its answer. True when it has to go again (forced): it stays running, so
+    /// nobody starts a second one meanwhile.
+    fn done(&mut self, now: std::time::Instant) -> bool {
+        if std::mem::take(&mut self.rerun) {
+            self.last = Some(now);
+            return true;
+        }
+        self.running = false;
+        false
+    }
+}
+
+fn check_done() -> bool {
+    CHECKS.lock().unwrap().done(std::time::Instant::now())
 }
 
 /// Ask YouTube whether the stored sign-in still stands and publish the answer. Browsers keep rotating these
@@ -1215,94 +1265,107 @@ fn may_verify(last: Option<std::time::Instant>, now: std::time::Instant, forced:
 /// Returns whether an answer is on its way (a check was started, or one is running): the caller's pages are then
 /// loaded again when it arrives (`session_renewed`), or the user is signed out.
 fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bool {
-    {
-        let mut last = LAST_VERIFY.lock().unwrap();
-        let now = std::time::Instant::now();
-        if VERIFYING.load(Ordering::Relaxed) {
-            return true;
-        }
-        if !may_verify(*last, now, forced) {
-            return false;
-        }
-        VERIFYING.store(true, Ordering::Relaxed); // (under the lock above, so two callers cannot both start one)
-        *last = Some(now);
+    // (under the lock, so two callers cannot both start one)
+    match CHECKS.lock().unwrap().ask(std::time::Instant::now(), forced) {
+        Ask::Start => {}
+        Ask::Running => return true,
+        Ask::No => return false,
     }
     st().rt.spawn(async move {
-        let started = sign_outs();
-        let had_cookie = auth::stored_cookie().is_some();
-        let check = match st().rp.user_auth_check_cookie().await {
-            Ok(()) => Check::Accepted,
-            Err(RpError::Auth(_)) => Check::Refused,
-            Err(e) => {
-                tracing::info!("sign-in check got no answer ({}); keeping the stored session", err(e));
-                Check::Unknown
+        let mut forced = forced;
+        // a renewal whose answer was set aside for a rerun: the rerun finds the new cookies good, but whatever was
+        // fetched with the old ones still has to be fetched again
+        let mut renewed_earlier = false;
+        loop {
+            let started = sign_outs();
+            let had_cookie = auth::stored_cookie().is_some();
+            let check = match st().rp.user_auth_check_cookie().await {
+                Ok(()) => Check::Accepted,
+                Err(RpError::Auth(_)) => Check::Refused,
+                Err(e) => {
+                    tracing::info!("sign-in check got no answer ({}); keeping the stored session", err(e));
+                    Check::Unknown
+                }
+            };
+            let mut renewed = false;
+            if check == Check::Refused && had_cookie {
+                match auth::remembered_browser() {
+                    Some(browser) => match import_session(browser.clone(), started).await {
+                        Ok(_) => {
+                            tracing::info!("the stored sign-in had expired; renewed it from {browser}");
+                            renewed = true;
+                        }
+                        // (the reason names the browser and what went wrong, never a cookie)
+                        Err(e) => tracing::warn!("the stored sign-in expired and could not be renewed from {browser}: {e}"),
+                    },
+                    None => tracing::warn!("the stored sign-in expired and there is no browser to renew it from (pasted cookies)"),
+                }
             }
-        };
-        let mut renewed = false;
-        if check == Check::Refused && had_cookie {
-            match auth::remembered_browser() {
-                Some(browser) => match import_session(browser.clone(), started).await {
-                    Ok(_) => {
-                        tracing::info!("the stored sign-in had expired; renewed it from {browser}");
-                        renewed = true;
+            let mut outcome = session_after(check, had_cookie, || renewed);
+            if renewed_earlier && outcome == Session::Good {
+                outcome = Session::Renewed;
+            }
+            let ok = outcome != Session::Dead;
+            {
+                let now = SIGN_OUTS.lock().unwrap();
+                if signed_out_since(started, *now) {
+                    // the user signed out while this ran: the answer is about a session that is gone on purpose
+                    REFUSED_WAITING.store(false, Ordering::Relaxed);
+                    renewed_earlier = false;
+                    tracing::info!("signed out during the sign-in check; its answer is dropped");
+                    if check_done() {
+                        forced = true; // and signed in again since: that sign-in is checked now
+                        continue;
                     }
-                    // (the reason names the browser and what went wrong, never a cookie)
-                    Err(e) => tracing::warn!("the stored sign-in expired and could not be renewed from {browser}: {e}"),
-                },
-                None => tracing::warn!("the stored sign-in expired and there is no browser to renew it from (pasted cookies)"),
+                    return;
+                }
+                if check_done() {
+                    // a forced check was asked for while this ran (a sign-in): its answer is the one that counts
+                    renewed_earlier |= outcome == Session::Renewed;
+                    forced = true;
+                    continue;
+                }
+                if outcome == Session::Renewed {
+                    // pages cached while the old cookies were refused must not be shown as this session's, and the
+                    // browser may have been signed in to another account since: its likes are read again below
+                    forget_liked();
+                    LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
+                }
+                set_logged(ok);
             }
-        }
-        let outcome = session_after(check, had_cookie, || renewed);
-        let ok = outcome != Session::Dead;
-        {
-            let now = SIGN_OUTS.lock().unwrap();
-            if signed_out_since(started, *now) {
-                // the user signed out while this ran: the answer is about a session that is gone on purpose
-                VERIFYING.store(false, Ordering::Relaxed);
-                REFUSED_WAITING.store(false, Ordering::Relaxed);
-                tracing::info!("signed out during the sign-in check; its answer is dropped");
-                return;
-            }
-            if outcome == Session::Renewed {
-                // pages cached while the old cookies were refused must not be shown as this session's, and the
-                // browser may have been signed in to another account since: its likes are read again below
-                forget_liked();
-                LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
-            }
-            set_logged(ok);
-        }
-        VERIFYING.store(false, Ordering::Relaxed);
-        // Publish the sign-in state FIRST; the liked-songs preload below is slow and must never gate it.
-        let th_liked = th.clone();
-        let expired = !ok && had_cookie;
-        let _ = th.queue(move |mut b| {
-            // (`logout` runs on this thread too: a sign-out queued ahead of this has already said "signed out")
-            if signed_out_since(started, sign_outs()) {
-                return;
-            }
-            b.as_mut().set_logged_in(ok);
-            // (read here, on the Qt thread, where `finish` sets it: a request refused a moment ago is not missed)
-            let waiting = REFUSED_WAITING.swap(false, Ordering::Relaxed);
-            match outcome {
-                Session::Renewed => b.as_mut().session_renewed(),
-                // the session stands, but a request was refused and told "refreshing your sign-in": it is worth
-                // one more go (and only one: the next check is `VERIFY_EVERY` away, so this cannot loop)
-                Session::Good if waiting => b.as_mut().session_renewed(),
-                Session::Dead if expired => b.as_mut().session_expired(),
-                _ => {}
-            }
-        });
-        if ok && (forced || outcome == Session::Renewed) {
-            load_liked().await;
-            if signed_out_since(started, sign_outs()) {
-                return;
-            }
-            let _ = th_liked.queue(|mut b| {
-                if LIKED_DIRTY.swap(false, Ordering::Relaxed) {
-                    let rev = *b.liked_rev() + 1;
-                    b.as_mut().set_liked_rev(rev);
+            // Publish the sign-in state FIRST; the liked-songs preload below is slow and must never gate it.
+            let th_liked = th.clone();
+            let expired = !ok && had_cookie;
+            let _ = th.queue(move |mut b| {
+                // (`logout` runs on this thread too: a sign-out queued ahead of this has already said "signed out")
+                if signed_out_since(started, sign_outs()) {
+                    return;
+                }
+                b.as_mut().set_logged_in(ok);
+                // (read here, on the Qt thread, where `finish` sets it: a request refused a moment ago is not missed)
+                let waiting = REFUSED_WAITING.swap(false, Ordering::Relaxed);
+                match outcome {
+                    Session::Renewed => b.as_mut().session_renewed(),
+                    // the session stands, but a request was refused and told "refreshing your sign-in": it is worth
+                    // one more go (and only one: the next check is `VERIFY_EVERY` away, so this cannot loop)
+                    Session::Good if waiting => b.as_mut().session_renewed(),
+                    Session::Dead if expired => b.as_mut().session_expired(),
+                    _ => {}
                 }
             });
+            if ok && (forced || outcome == Session::Renewed) {
+                load_liked().await;
+                if signed_out_since(started, sign_outs()) {
+                    return;
+                }
+                let _ = th_liked.queue(|mut b| {
+                    if LIKED_DIRTY.swap(false, Ordering::Relaxed) {
+                        let rev = *b.liked_rev() + 1;
+                        b.as_mut().set_liked_rev(rev);
+                    }
+                });
+            }
+            break;
         }
     });
     true
@@ -1816,6 +1879,34 @@ mod session_check_tests {
         assert!(!may_verify(Some(t0), t0 + Duration::from_secs(1), false));
         assert!(may_verify(Some(t0), t0 + VERIFY_EVERY, false));
         assert!(may_verify(Some(t0), t0 + Duration::from_secs(1), true), "the start of the app and Settings always ask");
+    }
+
+    fn idle() -> Checks {
+        Checks { running: false, rerun: false, last: None }
+    }
+
+    #[test]
+    fn a_sign_in_during_a_running_check_is_checked_once_that_one_is_done() {
+        let t0 = Instant::now();
+        let mut c = idle();
+        assert_eq!(c.ask(t0, true), Ask::Start);
+        assert_eq!(c.ask(t0, true), Ask::Running, "never two at once");
+        assert!(c.done(t0), "the forced ask that came in meanwhile runs it again");
+        assert!(c.running, "still running: nobody starts a second one alongside the rerun");
+        assert_eq!(c.ask(t0, false), Ask::Running);
+        assert!(!c.done(t0), "a refused request joining the rerun does not ask for another");
+        assert!(!c.running);
+    }
+
+    #[test]
+    fn refused_requests_joining_a_running_check_do_not_make_it_run_again() {
+        let t0 = Instant::now();
+        let mut c = idle();
+        assert_eq!(c.ask(t0, false), Ask::Start);
+        assert_eq!(c.ask(t0, false), Ask::Running);
+        assert!(!c.done(t0));
+        assert_eq!(c.ask(t0 + Duration::from_secs(1), false), Ask::No, "and the next one waits its turn");
+        assert_eq!(c.ask(t0 + Duration::from_secs(1), true), Ask::Start);
     }
 
     #[test]
