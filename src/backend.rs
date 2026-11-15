@@ -210,6 +210,15 @@ fn remember_liked(ids: impl IntoIterator<Item = String>) {
     LIKED_DIRTY.store(true, Ordering::Relaxed);
 }
 
+/// The hearts belong to an account: forget them, and this run's clicks with them, when the account may have changed
+/// (a sign-out, a sign-in, a renewal). One browser session can hold several Google accounts with the same cookies, so
+/// the cookies cannot tell whether a renewal changed it; the list is read again (`load_liked`) after each of these.
+fn forget_liked() {
+    liked_set(|s| s.clear());
+    like_choices(|c| c.clear());
+    LIKED_DIRTY.store(true, Ordering::Relaxed);
+}
+
 /// YouTube said whether one song is liked. Take its word unless the user clicked that heart in this run (`choice`).
 /// True when the heart has to be redrawn.
 fn settle_like(set: &mut HashSet<String>, choice: Option<bool>, video_id: &str, liked: bool) -> bool {
@@ -1118,6 +1127,7 @@ async fn login_cookie(text: String) -> Res {
     let _writing = SESSION_WRITE.lock().await;
     set_cookie(auth::parse_input(&text)?).await?;
     auth::remember_browser(None); // pasted cookies can't be renewed
+    forget_liked(); // maybe another account: Settings asks for a check, which reads its likes
     Ok(json!({"browser": "pasted cookies"}))
 }
 
@@ -1248,8 +1258,9 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
                 return;
             }
             if outcome == Session::Renewed {
-                // pages cached while the old cookies were refused must not be shown as this session's
-                LIKED_DIRTY.store(true, Ordering::Relaxed);
+                // pages cached while the old cookies were refused must not be shown as this session's, and the
+                // browser may have been signed in to another account since: its likes are read again below
+                forget_liked();
                 LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed);
             }
             set_logged(ok);
@@ -1295,10 +1306,14 @@ fn verify_session(th: cxx_qt::CxxQtThread<qobject::Backend>, forced: bool) -> bo
 /// what the user is actually looking at, and only reads as far as `liked_limit` allows.
 async fn load_liked() {
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    let epoch = login_epoch();
     let aq = authed();
     // Only the real Liked page: the library fallback would mark (and smart-download) songs that are not liked.
     let Ok((mut tracks, true)) = liked_tracks(&aq).await else { return };
     let _ = tracks.extend_limit(&aq, crate::config::current().library.liked_limit).await;
+    if login_epoch() != epoch {
+        return; // signed out or renewed while this was read: these may be another account's likes
+    }
     // Merge instead of replacing: pages the user already browsed may hold songs beyond the limit.
     // (and a heart clicked while this list was being read stays as the user left it)
     remember_liked(tracks.items.iter().map(|t| t.id.clone()));
@@ -1376,7 +1391,14 @@ impl qobject::Backend {
         QString::from(&Value::Array(list).to_string())
     }
     fn login_import(self: Pin<&mut Self>, browser: &QString) -> i32 {
-        spawn(self, login_import(browser.to_string()))
+        let browser = browser.to_string();
+        spawn(self, async move {
+            let r = login_import(browser).await;
+            if r.is_ok() {
+                forget_liked(); // maybe another account: Settings asks for a check, which reads its likes
+            }
+            r
+        })
     }
     fn login_cookie(self: Pin<&mut Self>, text: &QString) -> i32 {
         spawn(self, login_cookie(text.to_string()))
@@ -1389,7 +1411,7 @@ impl qobject::Backend {
             *n = n.wrapping_add(1);
             set_logged(false);
         }
-        liked_set(|s| s.clear());
+        forget_liked();
         auth::remember_browser(None); // signed out on purpose: don't sign back in at the next start
         st().rt.spawn(async move {
             let _writing = SESSION_WRITE.lock().await;
@@ -1739,6 +1761,18 @@ mod like_tests {
         assert!(like_needs_undo(Some(true), true));
         assert!(!like_needs_undo(Some(false), true), "unliked again since: the newer click stands");
         assert!(!like_needs_undo(None, true));
+    }
+
+    #[test]
+    fn another_account_starts_with_no_hearts_and_no_clicks() {
+        remember_liked(["a".to_owned()]);
+        like_choices(|c| c.insert("b".to_owned(), true));
+        forget_liked();
+        assert!(liked_set(|s| s.is_empty()), "the old account's likes are gone");
+        assert!(like_choices(|c| c.is_empty()), "and so are its clicks, or the next list read would get them back");
+        remember_liked(["c".to_owned()]);
+        assert_eq!(liked_set(|s| s.clone()), HashSet::from(["c".to_owned()]));
+        forget_liked();
     }
 
     #[test]
