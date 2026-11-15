@@ -215,16 +215,17 @@ impl Core {
     }
 
     /// True when `url` is the track that is playing right now (so `load(url)` needs to do nothing): it happens
-    /// after a gapless switch, when the UI catches up with the engine.
+    /// after a gapless switch, when the UI catches up with the engine. The URL may differ from the one the track was
+    /// opened with and still be that track (see `same_track`).
     pub fn is_playing_url(&self, url: &str) -> bool {
         // During a crossfade the incoming track is already what is heard while `cur` is still the outgoing one: the UI
         // asking for the incoming track must not cut the fade and restart it.
-        if self.fade.is_some() && self.next.as_ref().is_some_and(|n| n.meta.url == url) {
+        if self.fade.is_some() && self.next.as_ref().is_some_and(|n| same_track(&n.meta.url, url)) {
             return true;
         }
         let playing = self.ring.playing();
         match (&self.cur, playing) {
-            (Some(c), Some(p)) => c.meta.serial == p.serial && p.url == url,
+            (Some(c), Some(p)) => c.meta.serial == p.serial && same_track(&p.url, url),
             _ => false,
         }
     }
@@ -549,6 +550,25 @@ impl Drop for Engine {
             let _ = t.join();
         }
     }
+}
+
+/// The stream proxy's own URL for a song, split into what comes before the id (address and token) and the video id:
+/// `http://127.0.0.1:<port>/t/<token>/<id>` (streamed) or `http://127.0.0.1:<port>/t/<token>/dl/<id>` (downloaded).
+fn proxy_track(url: &str) -> Option<(&str, &str)> {
+    let (port, path) = url.strip_prefix("http://127.0.0.1:")?.split_once('/')?;
+    let (token, tail) = path.strip_prefix("t/")?.split_once('/')?;
+    let id = tail.strip_prefix("dl/").unwrap_or(tail);
+    let port_ok = !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit());
+    let token_ok = !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric());
+    let id_ok = (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    (port_ok && token_ok && id_ok).then(|| (&url[..url.len() - tail.len()], id))
+}
+
+/// `a` and `b` play the same song. Besides the very same URL, that is the proxy's stream of a song and the downloaded
+/// copy of it: a download that finishes while the song is queued next (or already playing) changes the URL the player
+/// asks for, and that must not restart a song that is already playing or fading in.
+fn same_track(a: &str, b: &str) -> bool {
+    a == b || proxy_track(a).is_some_and(|ta| proxy_track(b) == Some(ta))
 }
 
 fn spawn_open(tx: Sender<Cmd>, url: String, rate: u32, token: u64, next: bool) {
@@ -969,6 +989,41 @@ mod tests {
         assert!(core.fade.is_some(), "the fade never started");
         assert!(core.is_playing_url(&b), "the incoming track is already being heard: loading it must be a no-op");
         assert!(!core.is_playing_url("https://example.invalid/some-other-track"), "an unrelated url is still a real load");
+    }
+
+    #[test]
+    fn the_stream_and_the_download_of_a_song_are_the_same_track() {
+        let (stream, dl) = ("http://127.0.0.1:4242/t/ab12/dQw4w9WgXcQ", "http://127.0.0.1:4242/t/ab12/dl/dQw4w9WgXcQ");
+        assert!(same_track(stream, dl) && same_track(dl, stream) && same_track(dl, dl));
+        assert!(!same_track(stream, "http://127.0.0.1:4242/t/ab12/dl/otherSong01"), "another song");
+        assert!(!same_track(stream, "http://127.0.0.1:4243/t/ab12/dl/dQw4w9WgXcQ"), "another proxy");
+        assert!(!same_track(stream, "http://127.0.0.1:4242/t/zz99/dl/dQw4w9WgXcQ"), "another token");
+        assert!(!same_track(stream, "http://127.0.0.1:4242/t/ab12/cover/dQw4w9WgXcQ"), "not a song URL");
+        assert!(!same_track("http://example.invalid/t/ab12/x", "http://example.invalid/t/ab12/dl/x"), "not the proxy");
+        assert!(!same_track("http://127.0.0.1:4242/t/ab12/dl/dl/x", "http://127.0.0.1:4242/t/ab12/dl/x"), "no such shape");
+        assert!(!same_track("http://127.0.0.1:4242/t/ab12/a?b", "http://127.0.0.1:4242/t/ab12/dl/a?b"), "ids are checked");
+        assert!(same_track("/some/file.webm", "/some/file.webm") && !same_track("/a.webm", "/b.webm"), "anything else: exactly");
+    }
+
+    /// A download that finishes while the incoming track fades in changes the URL the UI asks for: still that track.
+    #[test]
+    fn asking_for_the_downloaded_copy_of_the_incoming_track_does_not_restart_the_fade() {
+        let (a, b) = (fixture("sine440_opus.webm"), fixture("sine880_opus.webm"));
+        let (b_stream, b_dl) = ("http://127.0.0.1:4242/t/ab12/sine880", "http://127.0.0.1:4242/t/ab12/dl/sine880");
+        let (mut core, mut dsp, _ring, _ev_rx) = rig(1000);
+        core.load_now(TrackStream::open_url(&a, 48_000).unwrap(), &a);
+        core.set_next_now(Some((TrackStream::open_url(&b, 48_000).unwrap(), b_stream.to_owned())));
+        let mut block = vec![0f32; 2 * 1024];
+        for _ in 0..2000 {
+            if core.fade.is_some() {
+                break;
+            }
+            core.pump(12_000);
+            dsp.render(&mut block);
+        }
+        assert!(core.fade.is_some(), "the fade never started");
+        assert!(core.is_playing_url(b_dl), "the downloaded copy of the incoming track");
+        assert!(!core.is_playing_url("http://127.0.0.1:4242/t/ab12/dl/chirp"), "another song is still a real load");
     }
 
     /// A core with its output, fed from fixture files: `(core, dsp, ring, events)`.

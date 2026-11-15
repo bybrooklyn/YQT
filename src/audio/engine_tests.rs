@@ -22,7 +22,7 @@ enum Mode {
     Stall(usize),
 }
 
-/// Serves `/ok/<name>` from the fixtures dir; anything else is a 404.
+/// Serves `/ok/<name>` (and `/t/tok/<id>`, `/t/tok/dl/<id>`) from the fixtures dir; anything else is a 404.
 fn serve(mode: Mode) -> String {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
@@ -48,10 +48,12 @@ fn handle(mut s: TcpStream, mode: Mode) -> std::io::Result<()> {
     let head = String::from_utf8_lossy(&head).into_owned();
     let path = head.split_whitespace().nth(1).unwrap_or("");
     let range = head.lines().find_map(|l| l.strip_prefix("Range: bytes=").or_else(|| l.strip_prefix("range: bytes=")));
-    let Some(name) = path.strip_prefix("/ok/") else {
+    // the proxy's own shapes too: `/t/tok/<id>` (a stream) and `/t/tok/dl/<id>` (a download) both serve `<id>_opus.webm`
+    let proxied = path.strip_prefix("/t/tok/").map(|r| format!("{}_opus.webm", r.strip_prefix("dl/").unwrap_or(r)));
+    let Some(name) = path.strip_prefix("/ok/").map(str::to_owned).or(proxied) else {
         return s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     };
-    let Ok(body) = std::fs::read(fixture(name)) else {
+    let Ok(body) = std::fs::read(fixture(&name)) else {
         return s.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     };
     let total = body.len();
@@ -202,6 +204,55 @@ fn gapless_switch_in_the_engine_and_the_ui_catching_up_does_not_restart() {
     assert!(!reload, "load() of the track already playing must not reload it");
     assert!(e.position_ms() > 100.0, "B keeps playing from where it was: {}", e.position_ms());
     wait_for(&rx, 6, |ev| matches!(ev, Event::Ended(m) if m.url.ends_with("sine880_opus.webm"))).expect("B ends");
+}
+
+/// The next track was queued as a stream; its download finished before the switch, so the UI catching up asks for the
+/// downloaded copy (another URL). That is the track already playing: it must not be stopped and opened again.
+#[test]
+fn the_ui_asking_for_the_downloaded_copy_of_the_track_already_playing_does_not_restart_it() {
+    let base = serve(Mode::Normal);
+    let (e, rx) = engine();
+    let (a, b, b_dl) = (format!("{base}/t/tok/sine440"), format!("{base}/t/tok/sine880"), format!("{base}/t/tok/dl/sine880"));
+    e.load(&a, 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(_))).unwrap();
+    e.set_next(Some(&b));
+    std::thread::sleep(Duration::from_millis(400)); // let the next track open
+    e.play();
+    wait_for(&rx, 8, |ev| matches!(ev, Event::Started(m) if m.url == b)).expect("switch to B");
+    e.load(&b_dl, 0);
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(rx.try_iter().all(|ev| !matches!(ev, Event::Loaded(_))), "the downloaded copy of B is B: no reload");
+    assert!(e.position_ms() > 100.0, "B keeps playing from where it was: {}", e.position_ms());
+    // a genuinely different song is a real load
+    let c = format!("{base}/t/tok/dl/chirp");
+    e.load(&c, 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(m) if m.url == c)).expect("another song loads");
+    // and after a stop, asking for a song again plays it again, whichever URL it comes under
+    e.load(&b, 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(m) if m.url == b)).unwrap();
+    e.stop();
+    std::thread::sleep(Duration::from_millis(100));
+    e.load(&b_dl, 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(m) if m.url == b_dl)).expect("a stopped track is loaded again");
+}
+
+/// The same during a crossfade: the UI asks for the incoming track under its downloaded URL while it fades in.
+#[test]
+fn the_downloaded_copy_of_the_incoming_track_does_not_restart_a_crossfade() {
+    let base = serve(Mode::Normal);
+    let (e, rx) = Engine::start(&Backend::Null { rate: 48_000 }, Arc::new(Settings::new(1000, true, false))).unwrap();
+    e.set_volume(0.0);
+    let (a, b, b_dl) = (format!("{base}/t/tok/sine440"), format!("{base}/t/tok/sine880"), format!("{base}/t/tok/dl/sine880"));
+    e.load(&a, 0);
+    wait_for(&rx, 5, |ev| matches!(ev, Event::Loaded(_))).unwrap();
+    e.set_next(Some(&b));
+    std::thread::sleep(Duration::from_millis(400));
+    e.play();
+    // A's end is reported when the fade starts, which is when the UI loads the next track
+    wait_for(&rx, 8, |ev| matches!(ev, Event::Ended(m) if m.url == a)).expect("the fade starts");
+    e.load(&b_dl, 0);
+    let seen = wait_for(&rx, 6, |ev| matches!(ev, Event::Ended(m) if m.url == b)).expect("B plays to its end");
+    assert!(!seen.iter().any(|ev| matches!(ev, Event::Loaded(_))), "the fade was not cut for a reload: {seen:?}");
 }
 
 #[test]
