@@ -198,22 +198,35 @@ fn like_needs_undo(choice: Option<bool>, refused: bool) -> bool {
 }
 
 /// The list id of the real Liked-music page while one is open: every page read from it holds liked songs, however
-/// far down the list (`liked_limit` only bounds what is read in the background).
-static LIKED_PAGER: AtomicI32 = AtomicI32::new(0);
+/// far down the list (`liked_limit` only bounds what is read in the background). With the `login_epoch()` its first
+/// page was asked for in: the account whose likes they are.
+static LIKED_PAGER: Mutex<(i32, u32)> = Mutex::new((0, 0));
 
-/// Songs YouTube just listed as liked: remember them for the hearts, with the user's own clicks kept on top.
-fn remember_liked(ids: impl IntoIterator<Item = String>) {
-    liked_set(|s| {
+/// Songs YouTube just listed as liked: remember them for the hearts, with the user's own clicks kept on top. Unless
+/// the hearts were started over since `epoch` (the `login_epoch()` when the request went out): a sign-out, a sign-in
+/// or a renewal came in between, and they may be another account's likes. False when they were dropped.
+fn remember_liked(epoch: u32, ids: impl IntoIterator<Item = String>) -> bool {
+    // (compared under the set's lock: the hearts are started over only after the epoch has moved on, so a list
+    // either lands before that or is turned away here)
+    let kept = liked_set(|s| {
+        if login_epoch() != epoch {
+            return false;
+        }
         s.extend(ids);
         like_choices(|c| apply_like_choices(s, c));
+        true
     });
-    LIKED_DIRTY.store(true, Ordering::Relaxed);
+    if kept {
+        LIKED_DIRTY.store(true, Ordering::Relaxed);
+    }
+    kept
 }
 
 /// The hearts belong to an account: forget them, and this run's clicks with them, when the account may have changed
 /// (a sign-out, a sign-in, a renewal). One browser session can hold several Google accounts with the same cookies, so
 /// the cookies cannot tell whether a renewal changed it; the list is read again (`load_liked`) after each of these.
 fn forget_liked() {
+    LOGIN_EPOCH.fetch_add(1, Ordering::Relaxed); // (first: a liked list still on its way is now turned away)
     liked_set(|s| s.clear());
     like_choices(|c| c.clear());
     LIKED_DIRTY.store(true, Ordering::Relaxed);
@@ -700,8 +713,9 @@ pub(crate) async fn more(key: i32) -> Res {
         return Err(err_for(auth, e)); // the pager knows whether its pages are fetched with the session
     }
     let items = clean_all(pager.items(from));
-    if key == LIKED_PAGER.load(Ordering::Relaxed) {
-        remember_liked(items.iter().filter_map(|i| i["videoId"].as_str()).filter(|id| !id.is_empty()).map(str::to_owned));
+    let (liked_key, liked_epoch) = *LIKED_PAGER.lock().unwrap();
+    if key == liked_key {
+        remember_liked(liked_epoch, items.iter().filter_map(|i| i["videoId"].as_str()).filter(|id| !id.is_empty()).map(str::to_owned));
     }
     let more = pager.has_more();
     if more {
@@ -1116,14 +1130,15 @@ pub(crate) async fn browse(target: String) -> Res {
             if id == crate::models::items::LIKED_ID {
                 // First page only; the rest loads on scroll. What the real Liked page shows is liked, so remember it for
                 // the hearts (the library fallback also lists songs that are not).
+                let epoch = login_epoch();
                 let (tracks, really_liked) = liked_tracks(&authed()).await.map_err(err_authed)?;
                 if really_liked {
-                    remember_liked(tracks.items.iter().map(|t| t.id.clone()));
+                    remember_liked(epoch, tracks.items.iter().map(|t| t.id.clone()));
                 }
                 let v = paged("Liked music", "", "", Pager::Tracks(tracks, "".into(), "".into()), true);
                 if really_liked {
                     // the pages that follow (on scroll, or fed into the queue) are liked songs as well
-                    LIKED_PAGER.store(v["pager"].as_i64().unwrap_or(0) as i32, Ordering::Relaxed);
+                    *LIKED_PAGER.lock().unwrap() = (v["pager"].as_i64().unwrap_or(0) as i32, epoch);
                 }
                 return Ok(v);
             }
@@ -1484,12 +1499,11 @@ async fn load_liked() {
     // Only the real Liked page: the library fallback would mark (and smart-download) songs that are not liked.
     let Ok((mut tracks, true)) = liked_tracks(&aq).await else { return };
     let _ = tracks.extend_limit(&aq, crate::config::current().library.liked_limit).await;
-    if login_epoch() != epoch {
-        return; // signed out or renewed while this was read: these may be another account's likes
-    }
     // Merge instead of replacing: pages the user already browsed may hold songs beyond the limit.
     // (and a heart clicked while this list was being read stays as the user left it)
-    remember_liked(tracks.items.iter().map(|t| t.id.clone()));
+    if !remember_liked(epoch, tracks.items.iter().map(|t| t.id.clone())) {
+        return; // signed out or renewed while this was read: these may be another account's likes
+    }
     // The smart-download rule "keep liked songs" gets its input here (it does nothing unless smart downloads are on).
     if crate::config::current().downloads.smart_enabled {
         let items = tracks
@@ -1941,12 +1955,12 @@ mod like_tests {
 
     #[test]
     fn another_account_starts_with_no_hearts_and_no_clicks() {
-        remember_liked(["a".to_owned()]);
+        remember_liked(login_epoch(), ["a".to_owned()]);
         like_choices(|c| c.insert("b".to_owned(), true));
         forget_liked();
         assert!(liked_set(|s| s.is_empty()), "the old account's likes are gone");
         assert!(like_choices(|c| c.is_empty()), "and so are its clicks, or the next list read would get them back");
-        remember_liked(["c".to_owned()]);
+        remember_liked(login_epoch(), ["c".to_owned()]);
         assert_eq!(liked_set(|s| s.clone()), HashSet::from(["c".to_owned()]));
         forget_liked();
     }
@@ -1975,6 +1989,14 @@ mod like_tests {
         assert_eq!(likes_in_flight(|m| m.get(id).copied()), Some(1));
         drop(second);
         assert!(likes_in_flight(|m| !m.contains_key(id)));
+    }
+
+    #[test]
+    fn a_liked_list_asked_for_before_a_sign_out_does_not_fill_the_hearts() {
+        // (the epoch only moves forward: one taken before any sign-out, sign-in or renewal is stale for good)
+        let before = login_epoch().wrapping_sub(1);
+        assert!(!remember_liked(before, ["stale-account-song".to_owned()]));
+        assert!(liked_set(|s| !s.contains("stale-account-song")));
     }
 
     #[test]
